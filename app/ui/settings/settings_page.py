@@ -127,7 +127,11 @@ class SettingsPage(QtWidgets.QWidget):
             if normalized == "Custom":
                 for field in ("api_key", "api_url", "model"):
                     creds[field] = _text_or_none(f"Custom_{field}")
-
+            else:
+                # For all other services, read the API key from the credentials widget
+                api_key = _text_or_none(f"{normalized}_api_key")
+                if api_key:
+                    creds['api_key'] = api_key
             return creds
 
         # no `service` passed → recurse over all known services
@@ -256,9 +260,13 @@ class SettingsPage(QtWidgets.QWidget):
                 translated_service = self.ui.value_mappings.get(service, service)
                 
                 if translated_service == "Custom":
-                    settings.setValue(f"{translated_service}_api_key", cred['api_key'])
-                    settings.setValue(f"{translated_service}_api_url", cred['api_url'])
-                    settings.setValue(f"{translated_service}_model", cred['model'])
+                    settings.setValue(f"{translated_service}_api_key", cred.get('api_key', ''))
+                    settings.setValue(f"{translated_service}_api_url", cred.get('api_url', ''))
+                    settings.setValue(f"{translated_service}_model", cred.get('model', ''))
+                else:
+                    api_key = cred.get('api_key', '')
+                    if api_key:
+                        settings.setValue(f"{translated_service}_api_key", api_key)
         else:
             settings.remove('credentials')  # Clear all credentials if save_keys is unchecked
         settings.endGroup()
@@ -376,9 +384,21 @@ class SettingsPage(QtWidgets.QWidget):
                 translated_service = self.ui.value_mappings.get(service, service)
                 
                 if translated_service == "Custom":
-                    self.ui.credential_widgets[f"{translated_service}_api_key"].setText(settings.value(f"{translated_service}_api_key", ''))
-                    self.ui.credential_widgets[f"{translated_service}_api_url"].setText(settings.value(f"{translated_service}_api_url", ''))
-                    self.ui.credential_widgets[f"{translated_service}_model"].setText(settings.value(f"{translated_service}_model", ''))
+                    widget_key = f"{translated_service}_api_key"
+                    if widget_key in self.ui.credential_widgets:
+                        self.ui.credential_widgets[widget_key].setText(settings.value(f"{translated_service}_api_key", ''))
+                    widget_url = f"{translated_service}_api_url"
+                    if widget_url in self.ui.credential_widgets:
+                        self.ui.credential_widgets[widget_url].setText(settings.value(f"{translated_service}_api_url", ''))
+                    widget_model = f"{translated_service}_model"
+                    if widget_model in self.ui.credential_widgets:
+                        self.ui.credential_widgets[widget_model].setText(settings.value(f"{translated_service}_model", ''))
+                else:
+                    widget_key = f"{translated_service}_api_key"
+                    if widget_key in self.ui.credential_widgets:
+                        saved_key = settings.value(f"{translated_service}_api_key", '')
+                        if saved_key:
+                            self.ui.credential_widgets[widget_key].setText(saved_key)
         settings.endGroup()
 
         # Initialize current language tracker after loading

@@ -31,6 +31,7 @@ from .cache_manager import CacheManager
 from .block_detection import BlockDetectionHandler
 from .inpainting import InpaintingHandler, call_inpaint_image
 from .ocr_handler import OCRHandler
+from modules.ocr.gemini_ocr import GeminiOCR
 
 if TYPE_CHECKING:
     from controller import ComicTranslate
@@ -189,12 +190,38 @@ class BatchProcessor:
                         err_msg = str(e)
 
                     logger.exception(f"OCR processing failed: {err_msg}")
-                    reason = f"OCR: {err_msg}"
-                    full_traceback = traceback.format_exc()
-                    self.skip_save(directory, timestamp, base_name, extension, archive_bname, image)
-                    self.main_page.image_skipped.emit(image_path, "OCR", err_msg)
-                    self.log_skipped_image(directory, timestamp, image_path, reason, full_traceback)
-                    continue
+
+                    # --- Auto-fallback to Gemini OCR ---
+                    should_skip = True
+                    current_ocr_key = settings_page.ui.reverse_mappings.get(ocr_model, ocr_model)
+                    if 'Gemini' not in current_ocr_key:
+                        try:
+                            logger.info("Primary OCR failed. Attempting auto-fallback with Gemini OCR...")
+                            gemini_engine = GeminiOCR()
+                            gemini_engine.initialize(settings_page, 'Gemini-2.5-Flash-Lite')
+                            gemini_engine.process_image(image, blk_list)
+
+                            if any(blk.text and blk.text.strip() for blk in blk_list):
+                                logger.info(
+                                    "Gemini OCR fallback succeeded for %d block(s)",
+                                    sum(1 for blk in blk_list if blk.text and blk.text.strip())
+                                )
+                                self.cache_manager._cache_ocr_results(cache_key, blk_list)
+                                rtl = True if source_lang == 'Japanese' else False
+                                blk_list = sort_blk_list(blk_list, rtl)
+                                should_skip = False
+                            else:
+                                logger.warning("Gemini OCR fallback completed but no text was recognized")
+                        except Exception as fallback_e:
+                            logger.exception(f"Gemini OCR fallback also failed: {fallback_e}")
+
+                    if should_skip:
+                        reason = f"OCR: {err_msg}"
+                        full_traceback = traceback.format_exc()
+                        self.skip_save(directory, timestamp, base_name, extension, archive_bname, image)
+                        self.main_page.image_skipped.emit(image_path, "OCR", err_msg)
+                        self.log_skipped_image(directory, timestamp, image_path, reason, full_traceback)
+                        continue
             else:
                 self.skip_save(directory, timestamp, base_name, extension, archive_bname, image)
                 self.main_page.image_skipped.emit(image_path, "Text Blocks", "")

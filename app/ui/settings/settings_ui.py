@@ -64,7 +64,11 @@ class SettingsPageUI(QtWidgets.QWidget):
         self.alignment = [self.tr("Left"), self.tr("Center"), self.tr("Right")]
 
         self.credential_services = [
-            self.tr("Custom"), 
+            self.tr("Custom"),
+            self.tr("Google Gemini"),
+            self.tr("Open AI GPT"),
+            self.tr("Anthropic Claude"),
+            self.tr("Deepseek"),
         ]
         
         self.supported_translators = [
