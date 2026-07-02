@@ -37,6 +37,21 @@ class OutlineInfo:
     width: float
     type: OutlineType
 
+
+def _outline_offsets(width: float) -> list[tuple[int, int]]:
+    radius = max(1, int(math.ceil(float(width))))
+    radius_sq = float(width) * float(width)
+    offsets = []
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dx == 0 and dy == 0:
+                continue
+            if dx * dx + dy * dy <= radius_sq:
+                offsets.append((dx, dy))
+    offsets.sort(key=lambda point: point[0] * point[0] + point[1] * point[1])
+    return offsets
+
+
 class TextBlockItem(QGraphicsTextItem):
     text_changed = Signal(str)
     item_selected = Signal(object)
@@ -424,11 +439,7 @@ class TextBlockItem(QGraphicsTextItem):
                 cursor.mergeCharFormat(fmt)
 
                 # Draw the outline for this selection
-                offsets = [(dx, dy) 
-                    for dx in (-outline_info.width, 0, outline_info.width)
-                    for dy in (-outline_info.width, 0, outline_info.width)
-                    if dx != 0 or dy != 0
-                ]
+                offsets = _outline_offsets(outline_info.width)
                 
                 for dx, dy in offsets:
                     painter.save()

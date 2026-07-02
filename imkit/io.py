@@ -24,11 +24,8 @@ def write_image(path: str, array: np.ndarray) -> None:
 
     ext = os.path.splitext(path)[1].lower()
     if ext in {".jpg", ".jpeg"}:
-        try:
-            im.save(path, quality="keep", **save_kwargs)
-            return
-        except (ValueError, OSError):
-            pass
+        im.save(path, quality=100, subsampling=0, optimize=False, **save_kwargs)
+        return
 
     im.save(path, **save_kwargs)
 
@@ -45,11 +42,8 @@ def encode_image(array: np.ndarray, ext: str = ".png", **kwargs) -> bytes:
 
     fmt = "JPEG" if fmt == "JPG" else fmt
     if fmt == "JPEG":
-        try:
-            im.save(buf, format=fmt, quality="keep", **save_kwargs)
-            return buf.getvalue()
-        except (ValueError, OSError):
-            pass
+        im.save(buf, format=fmt, quality=100, subsampling=0, optimize=False, **save_kwargs)
+        return buf.getvalue()
     if fmt == "PNG":
         # Pillow uses 0 (no compression) to 9. Mirror cv2.IMWRITE_PNG_COMPRESSION default 3.
         save_kwargs.setdefault("compress_level", kwargs.get("compress_level", 3))

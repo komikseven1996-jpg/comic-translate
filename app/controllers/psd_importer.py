@@ -10,15 +10,33 @@ from typing import Any
 
 import imkit as imk
 import numpy as np
-import photoshopapi as psapi
 from PySide6 import QtCore, QtGui
 
 from app.ui.canvas.text_item import OutlineInfo, OutlineType
 
 logger = logging.getLogger(__name__)
 
+psapi: Any | None = None
+_psapi_import_error: BaseException | None = None
+
 _ps_to_qt_font_cache: dict[str, tuple[str, str | None, bool, bool]] = {}
 _font_catalog_built = False
+
+
+def _load_photoshopapi() -> Any:
+    global psapi, _psapi_import_error
+    if psapi is not None:
+        return psapi
+    try:
+        import photoshopapi as module
+    except Exception as exc:
+        _psapi_import_error = exc
+        raise RuntimeError(
+            "PSD support is unavailable because PhotoshopAPI could not be loaded. "
+            f"Original error: {exc}"
+        ) from exc
+    psapi = module
+    return psapi
 
 
 @dataclass
@@ -37,6 +55,7 @@ class PsdImportContext:
 
 
 def import_psd_files(paths: list[str]) -> list[ImportedPsdPage]:
+    _load_photoshopapi()
     if not paths:
         return []
 
@@ -72,6 +91,7 @@ def import_psd_files(paths: list[str]) -> list[ImportedPsdPage]:
 
 
 def prepare_psd_font_catalog() -> None:
+    _load_photoshopapi()
     _ensure_font_catalog()
 
 

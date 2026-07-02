@@ -892,7 +892,7 @@ class ProjectController:
         try:
             # Get configured output format
             export_settings = self.main.settings_page.get_export_settings()
-            output_format = export_settings.get('output_format', 'WebP').lower()
+            output_format = export_settings.get('output_format', 'JPEG').lower()
 
             temp_main_page_context = None
             if self.main.webtoon_mode:
@@ -1283,11 +1283,11 @@ class ProjectController:
             if not isinstance(state, dict):
                 continue
             state["source_lang"] = to_canonical_language_name(
-                state.get("source_lang", "Auto"),
+                state.get("source_lang", "English"),
                 self.main.lang_mapping,
             )
             state["target_lang"] = to_canonical_language_name(
-                state.get("target_lang", "English"),
+                state.get("target_lang", "Indonesian"),
                 self.main.lang_mapping,
             )
 
@@ -1430,14 +1430,14 @@ class ProjectController:
         settings.beginGroup("main_page")
 
         # Load languages and convert back to current language
-        source_lang = settings.value("source_language", "Auto")
-        target_lang = settings.value("target_language", "English")
+        source_lang = settings.value("source_language", "English")
+        target_lang = settings.value("target_language", "Indonesian")
 
         # Use reverse mapping to get the translated language names
-        self.main.s_combo.setCurrentText(self.main.reverse_lang_mapping.get(source_lang, self.main.tr("Auto")))
-        self.main.t_combo.setCurrentText(self.main.reverse_lang_mapping.get(target_lang, self.main.tr("English")))
+        self.main.s_combo.setCurrentText(self.main.reverse_lang_mapping.get(source_lang, self.main.tr("English")))
+        self.main.t_combo.setCurrentText(self.main.reverse_lang_mapping.get(target_lang, self.main.tr("Indonesian")))
 
-        mode = settings.value("mode", "manual")
+        mode = settings.value("mode", "automatic")
         if mode == "manual":
             self.main.manual_radio.setChecked(True)
             self.main.manual_mode_selected()

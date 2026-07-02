@@ -24,9 +24,9 @@ class ExportPage(QtWidgets.QWidget):
         format_label = MLabel(self.tr("Output Image Format")).h4()
         self.output_format_combo = MComboBox()
         self.output_format_combo.addItems([
-            self.tr("WebP"),
-            self.tr("PNG"),
             self.tr("JPEG"),
+            self.tr("PNG"),
+            self.tr("WebP"),
         ])
         format_hint = MLabel(
             self.tr("Format used when saving output images (cleaned, translated).")

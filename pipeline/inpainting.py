@@ -8,7 +8,14 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QBrush
 
 from modules.utils.device import resolve_device
-from modules.utils.image_utils import build_block_mask_data, build_bubble_clip_mask, clip_mask_to_bubble, clip_mask_components_to_bubble
+from modules.utils.image_utils import (
+    BUBBLE_CLEANING_PROFILES,
+    build_block_mask_data,
+    build_bubble_clip_mask,
+    clip_mask_to_bubble,
+    clip_mask_components_to_bubble,
+    get_bubble_cleaning_profile,
+)
 from modules.utils.pipeline_config import inpaint_map, get_config, get_inpainter_backend
 from modules.utils.textblock import adjust_text_line_coordinates
 from pipeline.inpainting_boxes import merge_overlapping_padded_boxes
@@ -271,7 +278,9 @@ class InpaintingHandler:
         if base_bounds is None or len(base_bounds) < 4:
             return None
 
-        if getattr(block, "text_class", None) == "text_bubble":
+        profile = get_bubble_cleaning_profile(image, block)
+        profile_settings = BUBBLE_CLEANING_PROFILES.get(profile, BUBBLE_CLEANING_PROFILES["free_text"])
+        if getattr(block, "text_class", None) == "text_bubble" and profile_settings.get("use_full_bubble_crop") is True:
             bubble_bounds = getattr(block, "bubble_xyxy", None)
             if bubble_bounds is not None and len(bubble_bounds) >= 4:
                 return adjust_text_line_coordinates(bubble_bounds, 10, 10, image)
@@ -423,6 +432,16 @@ class InpaintingHandler:
                 continue
             if getattr(block, "text_class", None) != "text_bubble" or getattr(block, "bubble_xyxy", None) is None:
                 continue
+            profile = get_bubble_cleaning_profile(image, block)
+            profile_settings = BUBBLE_CLEANING_PROFILES.get(profile, BUBBLE_CLEANING_PROFILES["free_text"])
+            if profile_settings.get("fast_fill") is not True:
+                logger.info(
+                    "Inpaint fast-fill: block[%d] skipped profile=%s %s",
+                    idx,
+                    profile,
+                    self._format_block_debug_label(block),
+                )
+                continue
             bounds = self._get_fast_fill_bounds(block, image)
             if bounds is None:
                 continue
@@ -431,7 +450,11 @@ class InpaintingHandler:
             if not np.any(residual_crop):
                 continue
             crop_mask = np.where(residual_crop > 0, 255, 0).astype(np.uint8)
-            if getattr(block, "text_class", None) == "text_bubble" and getattr(block, "bubble_xyxy", None) is not None:
+            if (
+                profile_settings.get("clip_components_to_bubble") is True
+                and getattr(block, "text_class", None) == "text_bubble"
+                and getattr(block, "bubble_xyxy", None) is not None
+            ):
                 crop_mask = clip_mask_components_to_bubble(
                     crop_mask,
                     bounds,
@@ -484,7 +507,7 @@ class InpaintingHandler:
                 # If fallback only covered the text region, retry the wider bubble
                 # bounds against the remaining residual. That catches user brush
                 # strokes on bubble background after the text itself has been cleared.
-                if not self._same_bounds(bounds, fallback_bounds):
+                if profile_settings.get("use_full_bubble_crop") is True and not self._same_bounds(bounds, fallback_bounds):
                     retry_crop = residual_mask[y1:y2, x1:x2]
                     if np.any(retry_crop):
                         retry_mask = np.where(retry_crop > 0, 255, 0).astype(np.uint8)
@@ -535,7 +558,13 @@ class InpaintingHandler:
 
         fill_region = self._get_associated_residual_components(residual_crop, masked_region)
         
-        if getattr(block, "text_class", None) == "text_bubble" and getattr(block, "bubble_xyxy", None) is not None:
+        profile = get_bubble_cleaning_profile(cleaned_image, block)
+        profile_settings = BUBBLE_CLEANING_PROFILES.get(profile, BUBBLE_CLEANING_PROFILES["free_text"])
+        if (
+            profile_settings.get("clip_components_to_bubble") is True
+            and getattr(block, "text_class", None) == "text_bubble"
+            and getattr(block, "bubble_xyxy", None) is not None
+        ):
             bubble_mask = build_bubble_clip_mask(
                 fill_region.shape[:2],
                 bounds,

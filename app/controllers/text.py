@@ -11,11 +11,17 @@ from PySide6.QtGui import QColor, QTextCursor
 from app.ui.commands.textformat import TextFormatCommand
 from app.ui.commands.box import AddTextItemCommand, ResizeBlocksCommand
 from app.ui.commands.text_edit import TextEditCommand
-from app.ui.canvas.text_item import TextBlockItem
+from app.ui.canvas.text_item import OutlineInfo, OutlineType, TextBlockItem
 from app.ui.canvas.text.text_item_properties import TextItemProperties
 
 from modules.utils.textblock import TextBlock
-from modules.rendering.render import TextRenderingSettings, manual_wrap, is_vertical_block, pyside_word_wrap
+from modules.rendering.render import (
+    TextRenderingSettings,
+    get_render_outline_for_block,
+    manual_wrap,
+    is_vertical_block,
+    pyside_word_wrap,
+)
 from modules.utils.pipeline_config import font_selected
 from modules.utils.language_utils import get_language_code, get_layout_direction, is_no_space_lang
 from modules.utils.language_utils import to_canonical_language_name
@@ -127,6 +133,11 @@ class TextController:
         outline_color_str = render_settings.outline_color
         outline_color = QColor(outline_color_str) if self.main.outline_checkbox.isChecked() else None
         outline_width = float(render_settings.outline_width)
+        block_outline_color, block_outline_width, block_outline_enabled = get_render_outline_for_block(
+            blk,
+            outline_color,
+            outline_width,
+        )
         bold = render_settings.bold
         italic = render_settings.italic
         underline = render_settings.underline
@@ -140,8 +151,9 @@ class TextController:
             text_color=text_color,
             alignment=alignment,
             line_spacing=line_spacing,
-            outline_color=outline_color,
-            outline_width=outline_width,
+            outline_color=block_outline_color,
+            outline_width=block_outline_width,
+            outline=block_outline_enabled,
             bold=bold,
             italic=italic,
             underline=underline,
@@ -846,13 +858,18 @@ class TextController:
                             continue
 
                         vertical = is_vertical_block(blk, trg_lng_cd)
+                        block_outline_color, block_outline_width, block_outline_enabled = get_render_outline_for_block(
+                            blk,
+                            outline_color,
+                            outline_width,
+                        )
                         wrapped, font_size, rendered_width, rendered_height = pyside_word_wrap(
                             translation,
                             font_family,
                             block_width,
                             block_height,
                             line_spacing,
-                            outline_width,
+                            block_outline_width,
                             bold,
                             italic,
                             underline,
@@ -873,8 +890,9 @@ class TextController:
                             text_color=font_color,
                             alignment=alignment,
                             line_spacing=line_spacing,
-                            outline_color=outline_color,
-                            outline_width=outline_width,
+                            outline_color=block_outline_color,
+                            outline_width=block_outline_width,
+                            outline=block_outline_enabled,
                             bold=bold,
                             italic=italic,
                             underline=underline,
@@ -886,6 +904,15 @@ class TextController:
                             width=rendered_width,
                             height=rendered_height,
                             vertical=vertical,
+                            selection_outlines=[
+                                OutlineInfo(
+                                    0,
+                                    len(wrapped),
+                                    block_outline_color,
+                                    block_outline_width,
+                                    OutlineType.Full_Document,
+                                )
+                            ] if block_outline_enabled else [],
                         )
                         new_text_items_state.append(text_props.to_dict())
 

@@ -8,6 +8,7 @@ from modules.ocr.base import OCREngine
 from modules.utils.textblock import TextBlock
 from modules.utils.textblock import lists_to_blk_list
 from modules.utils.language_utils import is_no_space_lang, normalize_script
+from modules.detection.utils.geometry import calculate_iou
 from modules.utils.device import get_providers
 from modules.utils.download import ModelDownloader, ModelID
 from modules.utils.onnx import make_session
@@ -51,6 +52,7 @@ class PPOCRv5Engine(OCREngine):
 		self.rec_sess: Optional[Any] = None
 		self.use_text_lines = True
 		self.det_model = 'mobile'
+		self.lang = 'ch'
 		self.device = 'cpu'
 		self.det_post = DBPostProcessor(
 			thresh=0.3, 
@@ -71,6 +73,7 @@ class PPOCRv5Engine(OCREngine):
 		use_text_lines: bool = True
 	) -> None:
 		self.det_model = det_model
+		self.lang = lang
 		self.device = device
 		self.use_text_lines = use_text_lines
 		self.rec_batch_size = 1 if lang == 'latin' else 8
@@ -190,12 +193,14 @@ class PPOCRv5Engine(OCREngine):
 				texts = [text.strip() if text else "" for text in texts]
 				blk.texts, blk.skipped_small_texts = _split_japanese_small_line_texts(blk, lines, texts)
 				blk.text = ''.join(blk.texts) if is_no_space_lang(getattr(blk, 'source_lang', '')) else ' '.join(blk.texts)
+			if self.lang in {'en', 'latin'}:
+				self._append_unmatched_page_text(img, blk_list)
 			return blk_list
 		boxes, _ = self._det_infer(img)
 		if boxes is None or len(boxes) == 0:
 			return blk_list
 		crops = [crop_quad(img, quad.astype(np.float32)) for quad in boxes]
-		texts, _ = self._rec_infer(crops)
+		texts, confs = self._rec_infer(crops)
 		# map quads -> axis-aligned boxes
 		bboxes = []
 		for quad in boxes:
@@ -203,7 +208,55 @@ class PPOCRv5Engine(OCREngine):
 			ys = quad[:, 1]
 			x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
 			bboxes.append((x1, y1, x2, y2))
-		return lists_to_blk_list(blk_list, bboxes, texts)
+		lists_to_blk_list(blk_list, bboxes, texts)
+		if self.lang in {'en', 'latin'}:
+			for box, text, conf, quad in zip(bboxes, texts, confs, boxes):
+				text = (text or '').strip()
+				if not text or float(conf) < 0.35:
+					continue
+				if _matches_existing_block(list(box), text, blk_list):
+					continue
+				block = TextBlock(
+					text_bbox=np.array(box, dtype=np.int32),
+					text_class='text_free',
+					text=text,
+					texts=[text],
+					source_lang='en',
+				)
+				block.lines = [np.asarray(quad, dtype=np.float32)]
+				blk_list.append(block)
+		return blk_list
+
+	def _append_unmatched_page_text(self, img: np.ndarray, blk_list: List[TextBlock]) -> None:
+		boxes, _ = self._det_infer(img)
+		if boxes is None or len(boxes) == 0:
+			return
+
+		crops = [crop_quad(img, quad.astype(np.float32)) for quad in boxes]
+		texts, confs = self._rec_infer(crops)
+		for quad, text, conf in zip(boxes, texts, confs):
+			text = (text or '').strip()
+			if not text or float(conf) < 0.35:
+				continue
+			xs = quad[:, 0]
+			ys = quad[:, 1]
+			box = [
+				int(xs.min()),
+				int(ys.min()),
+				int(xs.max()),
+				int(ys.max()),
+			]
+			if _matches_existing_block(box, text, blk_list):
+				continue
+			block = TextBlock(
+				text_bbox=np.array(box, dtype=np.int32),
+				text_class='text_free',
+				text=text,
+				texts=[text],
+				source_lang='en',
+			)
+			block.lines = [np.asarray(quad, dtype=np.float32)]
+			blk_list.append(block)
 
 
 def _crop_line(img: np.ndarray, line) -> np.ndarray | None:
@@ -231,6 +284,28 @@ def _rec_target_width(img: np.ndarray, img_shape=(3, 48, 320)) -> int:
 	h, w = img.shape[:2]
 	ratio = w / float(max(1, h))
 	return max(W, int(np.ceil(H * ratio)))
+
+
+def _matches_existing_block(box: list[int], text: str, blk_list: List[TextBlock]) -> bool:
+	for blk in blk_list:
+		if getattr(blk, 'xyxy', None) is None:
+			continue
+		existing = [int(round(float(v))) for v in blk.xyxy[:4]]
+		if calculate_iou(existing, box) >= 0.10:
+			if not getattr(blk, 'text', '').strip():
+				blk.text = text
+				blk.texts = [text]
+			return True
+		ex1, ey1, ex2, ey2 = existing
+		x1, y1, x2, y2 = box
+		inter = max(0, min(ex2, x2) - max(ex1, x1)) * max(0, min(ey2, y2) - max(ey1, y1))
+		box_area = max(1, (x2 - x1) * (y2 - y1))
+		if inter / float(box_area) >= 0.65:
+			if not getattr(blk, 'text', '').strip():
+				blk.text = text
+				blk.texts = [text]
+			return True
+	return False
 
 
 def _split_japanese_small_line_texts(

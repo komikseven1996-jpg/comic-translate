@@ -12,7 +12,7 @@ from app.path_materialization import ensure_path_materialized
 from app.ui.canvas.save_renderer import ImageSaveRenderer
 from app.ui.canvas.text.text_item_properties import TextItemProperties
 from app.ui.canvas.text_item import OutlineInfo, OutlineType
-from modules.rendering.render import get_best_render_area, is_vertical_block, pyside_word_wrap
+from modules.rendering.render import get_best_render_area, get_render_outline_for_block, is_vertical_block, pyside_word_wrap
 from modules.utils.image_utils import get_smart_text_color
 from modules.utils.language_utils import get_language_code, is_no_space_lang
 from modules.utils.textblock import TextBlock
@@ -108,6 +108,11 @@ class RenderMixin:
                 continue
 
             vertical = is_vertical_block(block, target_lang_code)
+            block_outline_color, block_outline_width, block_outline_enabled = get_render_outline_for_block(
+                block,
+                outline_color,
+                outline_width,
+            )
             (
                 wrapped_translation,
                 font_size,
@@ -119,7 +124,7 @@ class RenderMixin:
                 width,
                 height,
                 line_spacing,
-                outline_width,
+                block_outline_width,
                 bold,
                 italic,
                 underline,
@@ -154,8 +159,9 @@ class RenderMixin:
                 text_color=font_color,
                 alignment=alignment,
                 line_spacing=line_spacing,
-                outline_color=outline_color,
-                outline_width=outline_width,
+                outline_color=block_outline_color,
+                outline_width=block_outline_width,
+                outline=block_outline_enabled,
                 bold=bold,
                 italic=italic,
                 underline=underline,
@@ -171,12 +177,12 @@ class RenderMixin:
                     OutlineInfo(
                         0,
                         len(wrapped_translation),
-                        outline_color,
-                        outline_width,
+                        block_outline_color,
+                        block_outline_width,
                         OutlineType.Full_Document,
                     )
                 ]
-                if outline
+                if block_outline_enabled
                 else [],
             )
             viewer_state["text_items_state"].append(text_props.to_dict())
@@ -200,7 +206,7 @@ class RenderMixin:
         base_name = os.path.splitext(os.path.basename(image_path))[0].strip()
         settings_page = self.main_page.settings_page
         export_settings = settings_page.get_export_settings()
-        output_format = export_settings.get('output_format', 'WebP')
+        output_format = export_settings.get('output_format', 'JPEG')
         extension = f".{output_format.lower()}"
         directory = os.path.dirname(image_path)
 

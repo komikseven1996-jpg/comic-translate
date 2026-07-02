@@ -105,7 +105,7 @@ class SettingsPage(QtWidgets.QWidget):
         if not autosave_folder:
             autosave_folder = get_default_project_autosave_dir()
         format_text = self.ui.output_format_combo.currentText()
-        output_format = self.ui.value_mappings.get(format_text, format_text)
+        output_format = self.ui.value_mappings.get(format_text, format_text) or "JPEG"
         settings = {
             'export_raw_text': self.ui.raw_text_checkbox.isChecked(),
             'export_translated_text': self.ui.translated_text_checkbox.isChecked(),
@@ -326,7 +326,7 @@ class SettingsPage(QtWidgets.QWidget):
 
         # Load HD strategy settings
         settings.beginGroup('hd_strategy')
-        strategy = settings.value('strategy', 'Resize')
+        strategy = settings.value('strategy', 'Original')
         translated_strategy = self.ui.reverse_mappings.get(strategy, strategy)
         if self.ui.inpaint_strategy_combo.findText(translated_strategy) != -1:
             self.ui.inpaint_strategy_combo.setCurrentText(translated_strategy)
@@ -352,11 +352,14 @@ class SettingsPage(QtWidgets.QWidget):
         self.ui.raw_text_checkbox.setChecked(settings.value('export_raw_text', False, type=bool))
         self.ui.translated_text_checkbox.setChecked(settings.value('export_translated_text', False, type=bool))
         self.ui.inpainted_image_checkbox.setChecked(settings.value('export_inpainted_image', False, type=bool))
-        # Load output format (default: WebP)
-        saved_format = settings.value('output_format', 'WebP')
+        saved_format = settings.value('output_format', 'JPEG')
+        if not saved_format:
+            saved_format = 'JPEG'
         translated_format = self.ui.reverse_mappings.get(saved_format, saved_format)
         if self.ui.output_format_combo.findText(translated_format) != -1:
             self.ui.output_format_combo.setCurrentText(translated_format)
+        else:
+            self.ui.output_format_combo.setCurrentText(self.ui.reverse_mappings.get('JPEG', 'JPEG'))
         autosave_enabled = settings.value('project_autosave_enabled', False, type=bool)
         owner = self.parent()
         title_bar = getattr(owner, "title_bar", None)

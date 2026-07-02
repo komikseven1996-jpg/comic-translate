@@ -40,7 +40,7 @@ class ToolsPage(QtWidgets.QWidget):
 
         inpaint_strategy_widget, self.inpaint_strategy_combo = create_title_and_combo(self.tr("HD Strategy"), self.inpaint_strategy, h4=False)
         set_combo_box_width(self.inpaint_strategy_combo, self.inpaint_strategy)
-        self.inpaint_strategy_combo.setCurrentText(self.tr("Resize"))
+        self.inpaint_strategy_combo.setCurrentText(self.tr("Original"))
 
         # HD Strategy detail widgets
         self.hd_strategy_widgets = QtWidgets.QWidget()

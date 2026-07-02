@@ -20,7 +20,7 @@ from modules.utils.pipeline_config import get_config
 from modules.utils.image_utils import generate_mask, get_smart_text_color
 from modules.utils.language_utils import get_language_code, is_no_space_lang
 from modules.utils.translator_utils import get_raw_translation, get_raw_text, format_translations, is_renderable_translation
-from modules.rendering.render import get_best_render_area, pyside_word_wrap, is_vertical_block
+from modules.rendering.render import get_best_render_area, get_render_outline_for_block, pyside_word_wrap, is_vertical_block
 from modules.utils.device import resolve_device
 from modules.utils.exceptions import InsufficientCreditsException
 from app.path_materialization import ensure_path_materialized
@@ -114,7 +114,7 @@ class BatchProcessor:
             base_name = os.path.splitext(os.path.basename(image_path))[0].strip()
             # Use configured output format for the extension
             export_settings = settings_page.get_export_settings()
-            output_format = export_settings.get('output_format', 'WebP')
+            output_format = export_settings.get('output_format', 'JPEG')
             extension = f".{output_format.lower()}"
             directory = os.path.dirname(image_path)
 
@@ -406,6 +406,11 @@ class BatchProcessor:
                 
                 # Determine if this block should use vertical rendering
                 vertical = is_vertical_block(blk, trg_lng_cd)
+                block_outline_color, block_outline_width, block_outline_enabled = get_render_outline_for_block(
+                    blk,
+                    outline_color,
+                    outline_width,
+                )
 
                 translation, font_size, rendered_width, rendered_height = pyside_word_wrap(
                     translation, 
@@ -413,7 +418,7 @@ class BatchProcessor:
                     block_width, 
                     block_height,
                     line_spacing, 
-                    outline_width, 
+                    block_outline_width, 
                     bold, 
                     italic, 
                     underline,
@@ -441,8 +446,9 @@ class BatchProcessor:
                     text_color=font_color,
                     alignment=alignment,
                     line_spacing=line_spacing,
-                    outline_color=outline_color,
-                    outline_width=outline_width,
+                    outline_color=block_outline_color,
+                    outline_width=block_outline_width,
+                    outline=block_outline_enabled,
                     bold=bold,
                     italic=italic,
                     underline=underline,
@@ -456,10 +462,10 @@ class BatchProcessor:
                     vertical=vertical,
                     selection_outlines=[
                         OutlineInfo(0, len(translation), 
-                        outline_color, 
-                        outline_width, 
+                        block_outline_color, 
+                        block_outline_width, 
                         OutlineType.Full_Document)
-                    ] if outline else [],
+                    ] if block_outline_enabled else [],
                 )
                 text_items_state.append(text_props.to_dict())
 

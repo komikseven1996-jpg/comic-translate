@@ -11,11 +11,29 @@ logger = logging.getLogger(__name__)
 
 import imkit as imk
 import numpy as np
-import photoshopapi as psapi
 from PySide6 import QtCore, QtGui
 
 from app.ui.canvas.text.text_item_properties import TextItemProperties
 from app.path_materialization import ensure_path_materialized
+
+psapi: Any | None = None
+_psapi_import_error: BaseException | None = None
+
+
+def _load_photoshopapi() -> Any:
+	global psapi, _psapi_import_error
+	if psapi is not None:
+		return psapi
+	try:
+		import photoshopapi as module
+	except Exception as exc:
+		_psapi_import_error = exc
+		raise RuntimeError(
+			"PSD export is unavailable because PhotoshopAPI could not be loaded. "
+			f"Original error: {exc}"
+		) from exc
+	psapi = module
+	return psapi
 
 
 def _u16_len(text: str) -> int:
@@ -64,6 +82,7 @@ def export_psd_pages(
 	bundle_name: str,
 	single_file_path: str | None = None,
 ) -> str:
+	_load_photoshopapi()
 	if not pages:
 		raise ValueError("No images available to export.")
 

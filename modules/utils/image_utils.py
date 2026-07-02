@@ -7,6 +7,57 @@ from typing import Any
 from modules.utils.textblock import TextBlock
 from modules.detection.utils.content import get_inpaint_mask
 
+BUBBLE_CLEANING_PROFILES: dict[str, dict[str, Any]] = {
+    "sfx": {
+        "crop_width_expand_pct": 4,
+        "crop_height_expand_pct": 4,
+        "crop_padding_px": 0,
+        "mask_kernel_size": 2,
+        "mask_dilate_iterations": 1,
+        "close_mask": False,
+        "min_component_area": 12,
+        "clip_components_to_bubble": False,
+        "fast_fill": False,
+    },
+    "free_text": {
+        "crop_width_expand_pct": 6,
+        "crop_height_expand_pct": 6,
+        "crop_padding_px": 0,
+        "mask_kernel_size": 3,
+        "mask_dilate_iterations": 1,
+        "clip_components_to_bubble": False,
+        "fast_fill": False,
+    },
+    "box": {
+        "crop_width_expand_pct": 14,
+        "crop_height_expand_pct": 14,
+        "crop_padding_px": 3,
+        "mask_kernel_size": 3,
+        "mask_dilate_iterations": 2,
+        "clip_components_to_bubble": False,
+        "fast_fill": True,
+    },
+    "speech_balloon": {
+        "crop_width_expand_pct": 10,
+        "crop_height_expand_pct": 10,
+        "crop_padding_px": 0,
+        "mask_kernel_size": 5,
+        "mask_dilate_iterations": 3,
+        "clip_components_to_bubble": True,
+        "fast_fill": True,
+        "use_full_bubble_crop": True,
+    },
+    "large_balloon": {
+        "crop_width_expand_pct": 8,
+        "crop_height_expand_pct": 8,
+        "crop_padding_px": 0,
+        "mask_kernel_size": 3,
+        "mask_dilate_iterations": 2,
+        "clip_components_to_bubble": False,
+        "fast_fill": False,
+    },
+}
+
 
 def build_bubble_clip_mask(
     mask_shape: tuple[int, int],
@@ -284,16 +335,145 @@ def get_smart_text_color(
 
     return setting_color
 
+def _coerce_xyxy(xyxy) -> tuple[int, int, int, int] | None:
+    try:
+        if xyxy is None or len(xyxy) < 4:
+            return None
+        x1, y1, x2, y2 = [int(round(float(v))) for v in xyxy[:4]]
+    except (TypeError, ValueError):
+        return None
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _clamp_xyxy_to_image(
+    xyxy: tuple[int, int, int, int],
+    img: np.ndarray,
+) -> tuple[int, int, int, int] | None:
+    h, w = img.shape[:2]
+    x1, y1, x2, y2 = xyxy
+    x1 = max(0, min(w, int(x1)))
+    y1 = max(0, min(h, int(y1)))
+    x2 = max(0, min(w, int(x2)))
+    y2 = max(0, min(h, int(y2)))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _expand_xyxy_by_percent(
+    xyxy: tuple[int, int, int, int],
+    width_pct: int,
+    height_pct: int,
+    img: np.ndarray,
+) -> tuple[int, int, int, int] | None:
+    x1, y1, x2, y2 = xyxy
+    width = max(1, x2 - x1)
+    height = max(1, y2 - y1)
+    pad_x = int(round((width * width_pct / 100.0) / 2.0))
+    pad_y = int(round((height * height_pct / 100.0) / 2.0))
+    return _clamp_xyxy_to_image((x1 - pad_x, y1 - pad_y, x2 + pad_x, y2 + pad_y), img)
+
+
+def _expand_xyxy_by_pixels(
+    xyxy: tuple[int, int, int, int],
+    pad_x: int,
+    pad_y: int,
+    img: np.ndarray,
+) -> tuple[int, int, int, int] | None:
+    x1, y1, x2, y2 = xyxy
+    return _clamp_xyxy_to_image((x1 - pad_x, y1 - pad_y, x2 + pad_x, y2 + pad_y), img)
+
+
+def _rect_area(xyxy: tuple[int, int, int, int]) -> int:
+    x1, y1, x2, y2 = xyxy
+    return max(0, x2 - x1) * max(0, y2 - y1)
+
+
+def _drop_tiny_mask_components(mask: np.ndarray, min_area: int) -> np.ndarray:
+    if min_area <= 0 or mask is None or not np.any(mask):
+        return mask
+    binary = (mask > 0).astype(np.uint8)
+    num_labels, labels, stats, _centroids = imk.connected_components_with_stats(binary, connectivity=8)
+    if num_labels <= 1:
+        return mask
+    keep_labels = [
+        label
+        for label in range(1, num_labels)
+        if int(stats[label, imk.CC_STAT_AREA]) >= min_area
+    ]
+    if not keep_labels:
+        return np.zeros_like(mask)
+    return np.where(np.isin(labels, keep_labels), 255, 0).astype(mask.dtype, copy=False)
+
+
+def get_bubble_cleaning_profile(img: np.ndarray, blk: TextBlock) -> str:
+    override = getattr(blk, "bubble_cleaning_profile", None) or getattr(blk, "cleaning_profile", None)
+    if override in BUBBLE_CLEANING_PROFILES:
+        return override
+
+    text_box = _coerce_xyxy(getattr(blk, "xyxy", None))
+    bubble_box = _coerce_xyxy(getattr(blk, "bubble_xyxy", None))
+    if getattr(blk, "text_class", None) == "text_free":
+        return "sfx"
+    if getattr(blk, "text_class", None) != "text_bubble" or text_box is None or bubble_box is None:
+        return "free_text"
+
+    h, w = img.shape[:2]
+    image_area = max(1, h * w)
+    text_area = max(1, _rect_area(text_box))
+    bubble_area = max(1, _rect_area(bubble_box))
+    bx1, by1, bx2, by2 = bubble_box
+    bubble_w = max(1, bx2 - bx1)
+    bubble_h = max(1, by2 - by1)
+
+    bubble_to_text = bubble_area / float(text_area)
+    bubble_page_ratio = bubble_area / float(image_area)
+    largest_page_span = max(bubble_w / float(max(1, w)), bubble_h / float(max(1, h)))
+    aspect = bubble_w / float(bubble_h)
+
+    if bubble_to_text >= 4.5 or (bubble_page_ratio >= 0.07 and bubble_to_text >= 3.2) or largest_page_span >= 0.42:
+        return "large_balloon"
+
+    if bubble_to_text <= 2.7 or aspect >= 2.6 or aspect <= 0.42:
+        return "box"
+
+    return "speech_balloon"
+
+
 def _resolve_block_crop_bounds(
     img: np.ndarray,
     blk: TextBlock,
     default_padding: int,
 ) -> tuple[int, int, int, int]:
-    from modules.utils.textblock import adjust_text_line_coordinates
+    text_box = _coerce_xyxy(getattr(blk, "xyxy", None))
+    if text_box is None:
+        return 0, 0, 0, 0
 
-    cx1, cy1, cx2, cy2 = adjust_text_line_coordinates(blk.xyxy, 10, 10, img)
+    profile = get_bubble_cleaning_profile(img, blk)
+    profile_settings = BUBBLE_CLEANING_PROFILES.get(profile, BUBBLE_CLEANING_PROFILES["free_text"])
+    expanded_text = _expand_xyxy_by_percent(
+        text_box,
+        int(profile_settings.get("crop_width_expand_pct", 10)),
+        int(profile_settings.get("crop_height_expand_pct", 10)),
+        img,
+    )
+    if expanded_text is None:
+        return 0, 0, 0, 0
+
+    crop_padding = int(profile_settings.get("crop_padding_px", 0))
+    if crop_padding > 0:
+        expanded_text = _expand_xyxy_by_pixels(expanded_text, crop_padding, crop_padding, img) or expanded_text
+
+    cx1, cy1, cx2, cy2 = expanded_text
     bubble_xyxy = getattr(blk, "bubble_xyxy", None)
-    if getattr(blk, "text_class", None) != "text_bubble" or bubble_xyxy is None or len(bubble_xyxy) < 4:
+    if (
+        profile_settings.get("use_full_bubble_crop") is not True
+        or getattr(blk, "text_class", None) != "text_bubble"
+        or bubble_xyxy is None
+        or len(bubble_xyxy) < 4
+    ):
         return cx1, cy1, cx2, cy2
 
     bx1, by1, bx2, by2 = [int(v) for v in bubble_xyxy[:4]]
@@ -320,19 +500,37 @@ def build_block_mask_data(
         return None, None
 
     cx1, cy1, cx2, cy2 = _resolve_block_crop_bounds(img, blk, default_padding)
+    if cx2 <= cx1 or cy2 <= cy1:
+        return None, None
+
     crop = img[cy1:cy2, cx1:cx2]
 
     crop_mask = detect_content_mask_in_bbox(crop)
     if crop_mask is None or not np.any(crop_mask):
         return None, None
 
-    close_kernel = imk.get_structuring_element(imk.MORPH_RECT, (3, 3))
-    crop_mask = imk.morphology_ex(crop_mask, imk.MORPH_CLOSE, close_kernel)
+    profile = get_bubble_cleaning_profile(img, blk)
+    profile_settings = BUBBLE_CLEANING_PROFILES.get(profile, BUBBLE_CLEANING_PROFILES["free_text"])
+    min_component_area = int(profile_settings.get("min_component_area", 0))
+    if min_component_area > 0:
+        crop_mask = _drop_tiny_mask_components(crop_mask, min_component_area)
+        if crop_mask is None or not np.any(crop_mask):
+            return None, None
 
-    kernel_size = default_padding
-    dilate_iterations = 3
+    if profile_settings.get("close_mask", True):
+        close_kernel = imk.get_structuring_element(imk.MORPH_RECT, (3, 3))
+        crop_mask = imk.morphology_ex(crop_mask, imk.MORPH_CLOSE, close_kernel)
 
-    if clip_to_bubble and getattr(blk, "text_class", None) == "text_bubble" and getattr(blk, "bubble_xyxy", None) is not None:
+    kernel_size = max(1, int(profile_settings.get("mask_kernel_size", default_padding)))
+    dilate_iterations = max(0, int(profile_settings.get("mask_dilate_iterations", 3)))
+
+    should_clip_to_bubble = (
+        clip_to_bubble
+        and profile_settings.get("clip_components_to_bubble") is True
+        and getattr(blk, "text_class", None) == "text_bubble"
+        and getattr(blk, "bubble_xyxy", None) is not None
+    )
+    if should_clip_to_bubble:
         inset = max(1, kernel_size)
         dilated_crop_mask = clip_mask_components_to_bubble(
             crop_mask,

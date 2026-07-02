@@ -1,10 +1,12 @@
 import logging
 from typing import List
+import numpy as np
 from PySide6 import QtCore
 
 from modules.detection.processor import TextBlockDetector
 from modules.detection.script_detection import ScriptDetector
 from modules.utils.textblock import TextBlock, sort_blk_list
+from modules.detection.utils.geometry import calculate_iou
 from modules.rendering.render import get_best_render_area
 from pipeline.webtoon_utils import get_first_visible_block
 from app.ui.commands.box import ReplaceDetectedBlocksCommand
@@ -78,6 +80,51 @@ class BlockDetectionHandler:
     def _maybe_annotate_language(self, image, blk_list: List[TextBlock]):
         self.annotate_language_if_auto(image, blk_list, self._source_lang_english())
 
+    def _add_english_ocr_detector_blocks(self, image, blk_list: List[TextBlock]) -> List[TextBlock]:
+        source_lang = self._source_lang_english()
+        if source_lang not in {"English", "Auto"}:
+            return blk_list
+        try:
+            from modules.ocr.ppocr import PPOCRv5Engine
+            from modules.ocr.ppocr.engine import _line_axis_box
+
+            detector = PPOCRv5Engine()
+            detector.initialize(lang="en", device="cpu", use_text_lines=False)
+            boxes, _scores = detector._det_infer(image)
+        except Exception:
+            logger.debug("English OCR detector fallback failed.", exc_info=True)
+            return blk_list
+
+        if boxes is None or len(boxes) == 0:
+            return blk_list
+
+        existing_boxes = [
+            [int(round(float(v))) for v in blk.xyxy[:4]]
+            for blk in blk_list
+            if getattr(blk, "xyxy", None) is not None and len(blk.xyxy) >= 4
+        ]
+        added = 0
+        for quad in boxes:
+            box = _line_axis_box(quad)
+            if box is None:
+                continue
+            if _box_too_small(box):
+                continue
+            if _overlaps_existing(box, existing_boxes):
+                continue
+            block = TextBlock(
+                text_bbox=np.array(box, dtype=np.int32),
+                text_class="text_free",
+                lines=[np.asarray(quad, dtype=np.float32)],
+                source_lang="en",
+            )
+            blk_list.append(block)
+            existing_boxes.append(list(box))
+            added += 1
+        if added:
+            logger.info("English OCR detector fallback added %d text block(s).", added)
+        return blk_list
+
     def detect_blocks(self, load_rects=True):
         if self.main_page.image_viewer.hasPhoto():
             if self.block_detector_cache is None:
@@ -91,6 +138,7 @@ class BlockDetectionHandler:
                     return [], load_rects, None
                 
                 blk_list = self.block_detector_cache.detect(image)
+                blk_list = self._add_english_ocr_detector_blocks(image, blk_list)
 
                 # Optimize render area immediately after detection (on local visible coordinates)
                 if blk_list:
@@ -143,6 +191,7 @@ class BlockDetectionHandler:
                 current_page = None
                 image = self.main_page.image_viewer.get_image_array()
                 blk_list = self.block_detector_cache.detect(image)
+                blk_list = self._add_english_ocr_detector_blocks(image, blk_list)
                 if blk_list:
                     get_best_render_area(blk_list, image)
                     self._maybe_annotate_language(image, blk_list)
@@ -206,3 +255,21 @@ class BlockDetectionHandler:
             # For visible area detection, we pass the detected blocks only for rectangle loading
             blocks_to_load = blk_list
             self.load_box_coords(blocks_to_load)
+
+
+def _box_too_small(box: tuple[int, int, int, int]) -> bool:
+    x1, y1, x2, y2 = box
+    return (x2 - x1) < 6 or (y2 - y1) < 6
+
+
+def _overlaps_existing(box: tuple[int, int, int, int], existing_boxes: list[list[int]]) -> bool:
+    x1, y1, x2, y2 = box
+    box_area = max(1, (x2 - x1) * (y2 - y1))
+    for existing in existing_boxes:
+        if calculate_iou(existing, list(box)) >= 0.10:
+            return True
+        ex1, ey1, ex2, ey2 = existing
+        inter = max(0, min(ex2, x2) - max(ex1, x1)) * max(0, min(ey2, y2) - max(ey1, y1))
+        if inter / float(box_area) >= 0.65:
+            return True
+    return False

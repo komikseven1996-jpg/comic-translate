@@ -2,7 +2,7 @@ import numpy as np
 from typing import Tuple, List
 
 from PIL import Image, ImageFont, ImageDraw
-from PySide6.QtGui import QFont, QTextDocument,\
+from PySide6.QtGui import QColor, QFont, QTextDocument,\
       QTextCursor, QTextBlockFormat, QTextOption
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
@@ -15,6 +15,8 @@ from app.ui.canvas.text.vertical_layout import VerticalTextDocumentLayout
 from modules.utils.language_utils import get_language_code, is_no_space_lang
 
 from dataclasses import dataclass
+
+SFX_OUTLINE_WIDTH = 4.0
 
 @dataclass
 class TextRenderingSettings:
@@ -61,6 +63,19 @@ def is_vertical_block(blk, lang_code: str | None) -> bool:
     and the target language code is one of the vertical-capable ones.
     """
     return getattr(blk, "direction", "") == "vertical" and is_vertical_language_code(lang_code)
+
+def is_sfx_block(blk) -> bool:
+    profile = getattr(blk, "bubble_cleaning_profile", None) or getattr(blk, "cleaning_profile", None)
+    if profile == "sfx":
+        return True
+    if profile == "free_text":
+        return False
+    return getattr(blk, "text_class", None) == "text_free"
+
+def get_render_outline_for_block(blk, outline_color, outline_width: float):
+    if is_sfx_block(blk):
+        return outline_color or QColor("#ffffff"), SFX_OUTLINE_WIDTH, True
+    return outline_color, outline_width, outline_color is not None
 
 def _split_at_fitting_hyphen(
     current_line: str,
@@ -454,6 +469,11 @@ def manual_wrap(
             continue
 
         vertical = is_vertical_block(blk, trg_lng_cd)
+        _outline_color, effective_outline_width, _outline_enabled = get_render_outline_for_block(
+            blk,
+            QColor("#ffffff"),
+            outline_width,
+        )
 
         translation, font_size = pyside_word_wrap(
             translation, 
@@ -461,7 +481,7 @@ def manual_wrap(
             width, 
             height,
             line_spacing, 
-            outline_width, 
+            effective_outline_width, 
             bold, 
             italic, 
             underline,
