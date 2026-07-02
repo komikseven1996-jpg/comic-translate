@@ -9,11 +9,6 @@ from typing import Any, List, Optional
 from .base import TranslationEngine
 from modules.utils.textblock import TextBlock 
 from modules.utils.language_utils import resolve_auto_source_language
-
-from app.account.auth.auth_client import AuthClient
-from app.account.auth.token_storage import get_token
-from app.ui.settings.settings_page import SettingsPage
-from app.account.config import WEB_API_TRANSLATE_URL
 from modules.utils.exceptions import InsufficientCreditsException, ContentFlaggedException
 from modules.utils.platform_utils import get_client_os
 
@@ -23,39 +18,24 @@ logger = logging.getLogger(__name__)
 
 class UserTranslator(TranslationEngine):
     """
-    Desktop translation engine that proxies requests to the web API endpoint,
-    utilizing the user's account credits and settings configured server-side.
+    Desktop translation engine that proxies requests to the web API endpoint.
+    Note: Requires login/account on comic-translate.com to function.
     """
 
-    def __init__(self, api_url: str = WEB_API_TRANSLATE_URL):
-        """
-        Args:
-            api_url: The full URL of the backend translation endpoint.
-        """
+    def __init__(self, api_url: str = ""):
         self.api_url = api_url
         self.source_lang: str = None
         self.target_lang: str = None
         self.translator_key: str = None 
-        self.settings: SettingsPage = None 
+        self.settings = None 
         self.is_llm: bool = False
-        self.auth_client: AuthClient = None
         self._session = requests.Session()
         self._profile_web_api = False
 
-    def initialize(self, settings: SettingsPage, source_lang: str, target_lang: str, translator_key: str, **kwargs) -> None:
-        """
-        Initialize the UserTranslator.
-
-        Args:
-            settings: The desktop application's settings object.
-            source_lang: Source language name.
-            target_lang: Target language name.
-            translator_key: The translator selected in the UI (e.g., "GPT-4.1").
-        """
+    def initialize(self, settings, source_lang: str, target_lang: str, translator_key: str, **kwargs) -> None:
         self.settings = settings
         self.source_lang = source_lang
         self.target_lang = target_lang
-        self.auth_client = settings.auth_client
         self.translator_key = translator_key
         self.is_llm = self._check_is_llm(translator_key)
 
@@ -64,57 +44,48 @@ class UserTranslator(TranslationEngine):
         return any(identifier in translator_key for identifier in llm_ids)
     
     def _get_access_token(self) -> Optional[str]:
-        """Retrieves the access token."""
+        """Retrieves the access token. Requires login to comic-translate.com."""
         try:
-            if not self.auth_client.validate_token():
-                logger.error("Access token invalid and refresh failed.")
+            if self.settings and hasattr(self.settings, 'auth_client'):
+                if not self.settings.auth_client.validate_token():
+                    logger.error("Access token invalid and refresh failed.")
+                    return None
+                try:
+                    from app.account.auth.token_storage import get_token
+                    token = get_token("access_token")
+                    if not token:
+                        logger.warning("Access token not found.")
+                        return None
+                    return token
+                except ImportError:
+                    logger.error("UserTranslator: Auth module not available. Web API requires account login.")
+                    return None
+            else:
+                logger.warning("UserTranslator: No authentication available. Web API requires login to comic-translate.com.")
                 return None
-            
-            token = get_token("access_token")
-            if not token:
-                logger.warning("Access token not found.")
-                return None
-            return token
         except Exception as e:
             logger.error(f"Failed to retrieve access token: {e}")
             return None
 
     def translate(self, blk_list: List[TextBlock], image: np.ndarray = None, extra_context: str = "") -> List[TextBlock]:
-        """
-        Sends the translation request to the web API.
-
-        Args:
-            blk_list: List of TextBlock objects (desktop version) to translate.
-            image: Image as numpy array (Optional, for LLM context).
-            extra_context: Additional context information for translation.
-
-        Returns:
-            List of updated TextBlock objects with translations or error messages.
-        """
         start_t = time.perf_counter()
         logger.info(f"UserTranslator: Translating via web API ({self.api_url}) for {self.translator_key}")
 
-        # 1. Get Access Token
         access_token = self._get_access_token()
         after_token_t = time.perf_counter()
 
-        # 2. Prepare Request Body (matching web API's TranslationRequest)
         texts_payload = []
         for i, blk in enumerate(blk_list):
-            # Use a simple index or the block's own ID if it has one suitable for mapping
-            block_id = getattr(blk, 'id', i) # Use existing ID or index
+            block_id = getattr(blk, 'id', i)
             texts_payload.append({"id": block_id, "text": blk.text})
 
-        # 3. Get LLM Options from Desktop Settings (if applicable)
         llm_options_payload = None
         if self.is_llm and self.settings:
-            # Access LLM settings from the desktop settings object
-            llm_settings = self.settings.get_llm_settings() # Assuming this method exists
+            llm_settings = self.settings.get_llm_settings()
             llm_options_payload = {
                 "image_input_enabled": llm_settings.get('image_input_enabled', False)
             }
 
-        # 4. Handle Image Encoding (if applicable and provided)
         image_base64_payload = None
         should_send_image = (
             self.is_llm
@@ -124,7 +95,6 @@ class UserTranslator(TranslationEngine):
         )
          
         if should_send_image:
-            # Use JPEG for significantly smaller payloads than PNG (faster over the wire).
             buffer = imk.encode_image(image, "jpg")
             image_base64_payload = base64.b64encode(buffer).decode('utf-8')
             logger.debug("UserTranslator: Encoded image for web API request.")
@@ -132,7 +102,6 @@ class UserTranslator(TranslationEngine):
 
         api_source_language = resolve_auto_source_language(blk_list, self.source_lang)
 
-        # 5. Construct Full Payload
         request_payload = {
             "translator": self.translator_key,
             "source_language": api_source_language,
@@ -146,7 +115,6 @@ class UserTranslator(TranslationEngine):
             request_payload["llm_options"] = llm_options_payload
             request_payload["extra_context"] = extra_context
 
-        # 6. Make the HTTP Request
         client_os = get_client_os()
         headers = {
             "Content-Type": "application/json",
@@ -169,13 +137,11 @@ class UserTranslator(TranslationEngine):
                 detail = error_data.get('detail')
                 description = ""
 
-                # detail can be a string, a dict, or a list (validation errors)
                 if isinstance(detail, dict):
                     description = detail.get('error_description') or detail.get('message')
                     if not description and detail.get('type'):
                         description = f"Error type: {detail.get('type')}"
                 elif isinstance(detail, list):
-                    # Pydantic validation errors
                     msgs = []
                     for err in detail:
                         loc = ".".join(str(x) for x in err.get('loc', []))
@@ -188,10 +154,8 @@ class UserTranslator(TranslationEngine):
                 if response.status_code == 402:
                     if isinstance(detail, dict) and detail.get('type') == 'INSUFFICIENT_CREDITS':
                         raise InsufficientCreditsException(description)
-                    # Implicit fallback for 402
                     raise InsufficientCreditsException(description)
                 
-                # Check for Content Flagged errors (400)
                 if response.status_code == 400:
                     is_flagged = False
                     if isinstance(detail, dict) and detail.get('type') == 'CONTENT_FLAGGED_UNSAFE':
@@ -202,17 +166,13 @@ class UserTranslator(TranslationEngine):
                     if is_flagged:
                         raise ContentFlaggedException(description, context="Translation")
 
-                # For other errors (400, 500 etc), raise a clear exception with the server message
                 if description:
                     raise Exception(f"Server Error ({response.status_code}): {description}") from e
 
             except ValueError:
-                # JSON parsing failed, just raise the original error
                 pass
-            # Re-raise the original error if we didn't handle it
             raise e
 
-        # 7. Process Response
         if response.status_code == 200:
             response_data = response.json()
             translations_map = {item['id']: item['translation'] for item in response_data.get('translations', [])}
@@ -220,7 +180,6 @@ class UserTranslator(TranslationEngine):
 
             logger.info(f"UserTranslator: Received successful response from web API. Credits: {credits_info}")
 
-            # Update TextBlock objects
             for i, blk in enumerate(blk_list):
                 block_id = getattr(blk, 'id', i)
                 blk.translation = translations_map.get(block_id, "")
@@ -251,6 +210,8 @@ class UserTranslator(TranslationEngine):
     def update_credits(self, credits: Optional[Any]) -> None:
         if credits is None:
             return
+        if not self.settings:
+            return
         if isinstance(credits, dict):
             self.settings.user_credits = credits
         else:
@@ -265,5 +226,5 @@ class UserTranslator(TranslationEngine):
                 logger.warning(f"UserTranslator: Unexpected credits format: {credits}")
                 return
 
-        self.settings._save_user_info_to_settings()
-        self.settings._update_account_view()
+        if hasattr(self.settings, '_save_user_info_to_settings'):
+            self.settings._save_user_info_to_settings()

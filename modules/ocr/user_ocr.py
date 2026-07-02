@@ -9,11 +9,6 @@ from ..utils.textblock import TextBlock
 from ..utils.textblock import lists_to_blk_list
 from ..utils.textblock import adjust_text_line_coordinates
 from ..utils.language_utils import resolve_auto_source_language
-
-from app.account.auth.auth_client import AuthClient
-from app.account.auth.token_storage import get_token
-from app.ui.settings.settings_page import SettingsPage
-from app.account.config import WEB_API_OCR_URL
 from ..utils.exceptions import InsufficientCreditsException, ContentFlaggedException
 from ..utils.platform_utils import get_client_os
 
@@ -22,73 +17,42 @@ logger = logging.getLogger(__name__)
 
 class UserOCR(OCREngine):
     """
-    Desktop OCR engine that proxies requests to the web API endpoint (/ocr),
-    utilizing the user's account credits and server-side OCR engines.
+    Desktop OCR engine that proxies requests to the web API endpoint (/ocr).
+    Note: Requires login/account on comic-translate.com to function.
     """
     LLM_OCR_KEYS = {"Gemini-2.5-Flash-Lite"} 
     FULL_PAGE_OCR_KEYS = {"Microsoft OCR"}
 
-    def __init__(self, api_url: str = WEB_API_OCR_URL):
-        """
-        Args:
-            api_url: The full URL of the backend OCR endpoint.
-        """
+    def __init__(self, api_url: str = ""):
         self.api_url = api_url
-        self.settings: SettingsPage = None
+        self.settings = None
         self.ocr_key: str = None 
         self.source_lang_english: str = None 
-        self.is_llm_type: bool = False # Flag for block-by-block processing
-        self.is_full_page_type: bool = False # Flag for full image processing
-        self.auth_client: AuthClient = None
+        self.is_llm_type: bool = False
+        self.is_full_page_type: bool = False
         self._session = requests.Session()
         self._profile_web_api = False
 
-    def initialize(self, settings: SettingsPage, source_lang_english: str = None, ocr_key: str = 'Default', **kwargs) -> None:
-        """
-        Initialize the UserOCR engine.
-
-        Args:
-            settings: The desktop application's settings object.
-            source_lang_english: Optional source language hint (in English).
-            ocr_key: The OCR key selected in the UI (e.g., "Microsoft OCR").
-            **kwargs: Catches potential extra arguments from factory.
-        """
+    def initialize(self, settings, source_lang_english: str = None, ocr_key: str = 'Default', **kwargs) -> None:
         self.settings = settings
         self.ocr_key = ocr_key
-        self.source_lang_english = source_lang_english # Store if needed by API
-        self.auth_client = settings.auth_client
-
-        # Determine processing strategy based on the key
+        self.source_lang_english = source_lang_english
         self.is_llm_type = self.ocr_key in self.LLM_OCR_KEYS
         self.is_full_page_type = self.ocr_key in self.FULL_PAGE_OCR_KEYS
 
         if not self.is_llm_type and not self.is_full_page_type:
-            # This shouldn't happen if the factory logic is correct, but good practice
             logger.error(f"UserOCR initialized with an unsupported key: {self.ocr_key}. Factory should prevent this.")
 
-
     def process_image(self, img: np.ndarray, blk_list: List[TextBlock]) -> List[TextBlock]:
-        """
-        Sends the OCR request to the web API based on the OCR key type.
-
-        Args:
-            img: Input image as numpy array.
-            blk_list: List of TextBlock objects (desktop version) to update.
-
-        Returns:
-            The updated list of TextBlock objects with OCR text or error messages.
-        """
         start_t = time.perf_counter()
         logger.info(f"UserOCR: Attempting OCR via web API ({self.api_url}) for {self.ocr_key}")
 
-        # Get Access Token
         access_token = self._get_access_token()
         if not access_token:
             logger.error("UserOCR Error: Access token not found. Cannot use web API.")
             return blk_list
         after_token_t = time.perf_counter()
 
-        # Determine Strategy and Execute
         if self.is_llm_type:
             logger.debug(f"UserOCR: Using block-by-block strategy for {self.ocr_key}")
             result = self._process_blocks_llm(img, blk_list, access_token)
@@ -106,45 +70,44 @@ class UserOCR(OCREngine):
                 print(msg)
             return result
         else:
-            # Fallback or error if key wasn't categorized during init
             logger.error(f"UserOCR: Unknown processing strategy for key '{self.ocr_key}'. Aborting.")
             return blk_list
 
     def _get_access_token(self) -> Optional[str]:
-        """Retrieves the access token."""
+        """Retrieves the access token. Requires login to comic-translate.com."""
         try:
-            if not self.auth_client.validate_token():
-                logger.error("Access token invalid and refresh failed.")
+            if self.settings and hasattr(self.settings, 'auth_client'):
+                if not self.settings.auth_client.validate_token():
+                    logger.error("Access token invalid and refresh failed.")
+                    return None
+                try:
+                    from app.account.auth.token_storage import get_token
+                    token = get_token("access_token")
+                    if not token:
+                        logger.warning("Access token not found.")
+                        return None
+                    return token
+                except ImportError:
+                    logger.error("UserOCR: Auth module not available. Web API requires account login.")
+                    return None
+            else:
+                logger.warning("UserOCR: No authentication available. Web API requires login to comic-translate.com.")
                 return None
-            
-            token = get_token("access_token")
-            if not token:
-                logger.warning("Access token not found.")
-                return None
-            return token
         except Exception as e:
             logger.error(f"Failed to retrieve access token: {e}")
             return None
 
     def _get_llm_options(self) -> Optional[Dict[str, Any]]:
-        """Extracts LLM options from desktop settings."""
         if not self.settings:
             logger.warning("Settings object not available in UserOCR, cannot get LLM options.")
             return None
-        
-        # Adapt this based on your actual settings structure
-        llm_settings = self.settings.get_llm_settings() # Assuming this method exists
+        llm_settings = self.settings.get_llm_settings()
         options = {
             "temperature": llm_settings.get('temperature', None), 
         }
-        # Filter out None values if the API prefers missing keys over null values
         return {k: v for k, v in options.items() if v is not None}
 
     def _process_blocks_llm(self, img: np.ndarray, blk_list: List[TextBlock], token: str) -> List[TextBlock]:
-        """
-        Handles OCR for LLM types (GPT, Gemini) by sending a single batch request
-        containing the full image and a list of coordinates for each text block.
-        """
         start_t = time.perf_counter()
         client_os = get_client_os()
         headers = {
@@ -155,14 +118,12 @@ class UserOCR(OCREngine):
         llm_options = self._get_llm_options()
         api_source_language = resolve_auto_source_language(blk_list, self.source_lang_english)
 
-        # 1. Prepare Validation & Coordinates
         valid_indices = []
         coordinates = []
         
         h, w = img.shape[:2]
 
         for i, blk in enumerate(blk_list):
-            # Determine coordinates to be used
             if blk.bubble_xyxy is not None:
                 x1, y1, x2, y2 = blk.bubble_xyxy
             elif blk.xyxy is not None:
@@ -174,7 +135,6 @@ class UserOCR(OCREngine):
                 logger.warning(f"Block {i} has no coordinates, skipping.")
                 continue
 
-            # Validate coordinates against image bounds
             x1, y1 = max(0, int(x1)), max(0, int(y1))
             x2, y2 = min(w, int(x2)), min(h, int(y2))
 
@@ -189,23 +149,20 @@ class UserOCR(OCREngine):
             logger.info("No valid blocks to process.")
             return blk_list
 
-        # 2. Encode Full Image
         img_b64 = self.encode_image(img)
         if not img_b64:
             logger.error("Failed to encode image for batch processing.")
             return blk_list
         after_encode_t = time.perf_counter()
 
-        # 3. Construct Payload
         payload = {
             "ocr_name": self.ocr_key,
             "image_base64": img_b64,
             "llm_options": llm_options,
             "source_language": api_source_language,
-            "coordinates": coordinates  # New field for batch processing
+            "coordinates": coordinates
         }
 
-        # 4. Send Single Request
         before_http_t = time.perf_counter()
         response = self._session.post(
             self.api_url,
@@ -222,13 +179,11 @@ class UserOCR(OCREngine):
                 detail = error_data.get('detail')
                 description = ""
                 
-                # detail can be a string, a dict, or a list (validation errors)
                 if isinstance(detail, dict):
                     description = detail.get('error_description') or detail.get('message')
                     if not description and detail.get('type'):
                         description = f"Error type: {detail.get('type')}"
                 elif isinstance(detail, list):
-                    # Pydantic validation errors
                     msgs = []
                     for err in detail:
                         loc = ".".join(str(x) for x in err.get('loc', []))
@@ -241,10 +196,8 @@ class UserOCR(OCREngine):
                 if response.status_code == 402:
                     if isinstance(detail, dict) and detail.get('type') == 'INSUFFICIENT_CREDITS':
                         raise InsufficientCreditsException(description)
-                    # Implicit fallback for 402
                     raise InsufficientCreditsException(description)
                         
-                # Check for Content Flagged errors (400)
                 if response.status_code == 400:
                     is_flagged = False
                     if isinstance(detail, dict) and detail.get('type') == 'CONTENT_FLAGGED_UNSAFE':
@@ -255,12 +208,10 @@ class UserOCR(OCREngine):
                     if is_flagged:
                         raise ContentFlaggedException(description, context="OCR")
 
-                # For other errors (400, 500 etc), raise a clear exception with the server message
                 if description:
                     raise Exception(f"Server Error ({response.status_code}): {description}") from e
 
             except ValueError:
-                # JSON parsing failed, just raise the original error
                 pass
             raise e
 
@@ -268,19 +219,15 @@ class UserOCR(OCREngine):
             response_data = response.json()
             results = response_data.get('ocr_results', [])
 
-            # 5. Map Results back to Blocks
-            # We assume the server returns results in the same order as coordinates
             if len(results) != len(valid_indices):
                 logger.warning(f"Mismatch in result count: sent {len(coordinates)}, received {len(results)}.")
 
             for idx_in_results, result_item in enumerate(results):
-                # Safely map back if sizes match or iterate up to min length
                 if idx_in_results < len(valid_indices):
                     original_blk_idx = valid_indices[idx_in_results]
                     blk = blk_list[original_blk_idx]
                     blk.text = result_item.get('text', '')
 
-            # Update credits
             credits_info = response_data.get('credits') or response_data.get('credits_remaining')
             self.update_credits(credits_info)
 
@@ -296,7 +243,6 @@ class UserOCR(OCREngine):
         return blk_list
 
     def _process_full_page(self, img: np.ndarray, blk_list: List[TextBlock], token: str) -> List[TextBlock]:
-        """Handles OCR for full-page types (Google, Microsoft)."""
         start_t = time.perf_counter()
         client_os = get_client_os()
         headers = {
@@ -305,7 +251,6 @@ class UserOCR(OCREngine):
             "X-Client-OS": client_os
         }
 
-        # Encode the entire image
         img_b64 = self.encode_image(img)
         if not img_b64:
             logger.error("UserOCR: Failed to encode the full image.")
@@ -313,14 +258,12 @@ class UserOCR(OCREngine):
         after_encode_t = time.perf_counter()
         api_source_language = resolve_auto_source_language(blk_list, self.source_lang_english)
 
-        # Prepare Payload
         payload = {
             "ocr_name": self.ocr_key,
             "image_base64": img_b64,
             "source_language": api_source_language 
         }
 
-        # Single API call for the whole page
         before_http_t = time.perf_counter()
         response = self._session.post(
             self.api_url, 
@@ -337,13 +280,11 @@ class UserOCR(OCREngine):
                 detail = error_data.get('detail')
                 description = ""
 
-                # detail can be a string, a dict, or a list (validation errors)
                 if isinstance(detail, dict):
                     description = detail.get('error_description') or detail.get('message')
                     if not description and detail.get('type'):
                          description = f"Error type: {detail.get('type')}"
                 elif isinstance(detail, list):
-                    # Pydantic validation errors
                     msgs = []
                     for err in detail:
                         loc = ".".join(str(x) for x in err.get('loc', []))
@@ -356,10 +297,8 @@ class UserOCR(OCREngine):
                 if response.status_code == 402:
                     if isinstance(detail, dict) and detail.get('type') == 'INSUFFICIENT_CREDITS':
                         raise InsufficientCreditsException(description)
-                    # Implicit fallback for 402
                     raise InsufficientCreditsException(description)
                         
-                # Check for Content Flagged errors (400)
                 if response.status_code == 400:
                     is_flagged = False
                     if isinstance(detail, dict) and detail.get('type') == 'CONTENT_FLAGGED_UNSAFE':
@@ -370,12 +309,10 @@ class UserOCR(OCREngine):
                     if is_flagged:
                         raise ContentFlaggedException(description, context="OCR")
                         
-                # For other errors (400, 500 etc), raise a clear exception with the server message
                 if description:
                      raise Exception(f"Server Error ({response.status_code}): {description}") from e
 
             except ValueError:
-                # JSON parsing failed, just raise the original error
                 pass
             raise e
 
@@ -387,12 +324,11 @@ class UserOCR(OCREngine):
                 logger.warning("UserOCR: Web API returned successful status but no OCR results.")
                 return blk_list
 
-            # Extract text and coordinates from API response
             texts_string = []
-            texts_bboxes = [] # List of [x1, y1, x2, y2]
+            texts_bboxes = []
             for item in api_results:
                 text = item.get('text')
-                coords = item.get('coordinates') # Expecting [x1, y1, x2, y2]
+                coords = item.get('coordinates')
                 if text and coords and len(coords) == 4:
                     texts_string.append(text)
                     texts_bboxes.append(coords)
@@ -428,6 +364,8 @@ class UserOCR(OCREngine):
     def update_credits(self, credits: Optional[Any]) -> None:
         if credits is None:
             return
+        if not self.settings:
+            return
         if isinstance(credits, dict):
             self.settings.user_credits = credits
         else:
@@ -442,5 +380,5 @@ class UserOCR(OCREngine):
                 logger.warning(f"UserOCR: Unexpected credits format: {credits}")
                 return
 
-        self.settings._save_user_info_to_settings()
-        self.settings._update_account_view()
+        if hasattr(self.settings, '_save_user_info_to_settings'):
+            self.settings._save_user_info_to_settings()

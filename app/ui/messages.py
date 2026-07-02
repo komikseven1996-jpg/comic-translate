@@ -34,7 +34,7 @@ class Messages:
         MMessage.error(
             text=QCoreApplication.translate(
                 "Messages",
-                "Please sign in or sign up via Settings > Account to continue."
+                "Please configure your API keys in Settings > Advanced to continue."
             ),
             parent=parent,
             duration=None,
@@ -76,19 +76,15 @@ class Messages:
         """
         msg = QtWidgets.QMessageBox(parent)
         msg.setIcon(QtWidgets.QMessageBox.Warning)
-        msg.setWindowTitle(QCoreApplication.translate("Messages", "Insufficient Credits"))
+        msg.setWindowTitle(QCoreApplication.translate("Messages", "API Error"))
         msg.setText(QCoreApplication.translate(
             "Messages", 
-            "Insufficient credits to perform this action.\nGo to Settings > Account to buy more credits."
+            "The server was unable to process your request. Check your API key configuration in Settings."
         ))
         
         if details:
             msg.setDetailedText(details)
 
-        buy_btn = msg.addButton(
-            QCoreApplication.translate("AccountPage", "Buy Credits"),
-            QtWidgets.QMessageBox.ButtonRole.ActionRole,
-        )
         ok_btn = msg.addButton(
             QCoreApplication.translate("Messages", "OK"),
             QtWidgets.QMessageBox.ButtonRole.AcceptRole,
@@ -96,22 +92,16 @@ class Messages:
         msg.setDefaultButton(ok_btn)
         msg.exec()
 
-        if msg.clickedButton() == buy_btn:
-            settings_page = getattr(parent, "settings_page", None)
-            if settings_page is not None and hasattr(settings_page, "start_buy_credits_flow"):
-                settings_page.start_buy_credits_flow()
-
     @staticmethod
     def show_custom_not_configured_error(parent):
         """
         Show an error message when Custom is selected without proper configuration.
-        Guides users to use the Credits system instead.
         """
         MMessage.error(
             text=QCoreApplication.translate(
                 "Messages",
-                "Custom requires advanced API configuration. Most users should use the Credits system instead.\n"
-                "Please sign in via Settings > Account to use credits, or configure Custom API settings in Settings > Advanced."
+                "Custom requires advanced API configuration.\n"
+                "Please configure your Custom API settings in Settings > Advanced."
             ),
             parent=parent,
             duration=None,
