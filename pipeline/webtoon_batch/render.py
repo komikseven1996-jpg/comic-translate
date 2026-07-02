@@ -198,7 +198,10 @@ class RenderMixin:
             return
 
         base_name = os.path.splitext(os.path.basename(image_path))[0].strip()
-        extension = os.path.splitext(image_path)[1]
+        settings_page = self.main_page.settings_page
+        export_settings = settings_page.get_export_settings()
+        output_format = export_settings.get('output_format', 'WebP')
+        extension = f".{output_format.lower()}"
         directory = os.path.dirname(image_path)
 
         archive_bname = ""

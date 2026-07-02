@@ -824,12 +824,12 @@ class ProjectController:
         return candidate
 
     @staticmethod
-    def _build_export_page_name(page_number: int, file_path: str) -> str:
+    def _build_export_page_name(page_number: int, file_path: str, output_format: str = "") -> str:
         # Use the original filename directly
         basename = os.path.basename(file_path)
         # Sanitize the filename to remove any problematic characters
         stem = os.path.splitext(basename)[0]
-        ext = os.path.splitext(basename)[1].lower() or ".png"
+        ext = f".{output_format.lower()}" if output_format else (os.path.splitext(basename)[1].lower() or ".png")
         stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
         if not stem:
             stem = f"page_{page_number:04d}"
@@ -889,7 +889,11 @@ class ProjectController:
         except Exception:
             logger.debug("Export pre-materialization failed; continuing lazily.", exc_info=True)
         temp_dir = tempfile.mkdtemp(prefix="comic_translate_export_")
-        try:            
+        try:
+            # Get configured output format
+            export_settings = self.main.settings_page.get_export_settings()
+            output_format = export_settings.get('output_format', 'WebP').lower()
+
             temp_main_page_context = None
             if self.main.webtoon_mode:
                 temp_main_page_context = type('TempMainPage', (object,), {
@@ -920,7 +924,7 @@ class ProjectController:
                     else:
                         renderer.add_state_to_image(viewer_state)
 
-                    sv_pth = os.path.join(group_dir, self._build_export_page_name(page_number, file_path))
+                    sv_pth = os.path.join(group_dir, self._build_export_page_name(page_number, file_path, output_format))
                     renderer.save_image(sv_pth)
 
                 os.makedirs(os.path.dirname(group["output_path"]) or ".", exist_ok=True)

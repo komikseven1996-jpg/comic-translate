@@ -147,6 +147,11 @@ class SettingsPageUI(QtWidgets.QWidget):
             self.tr("Center"): "Center",
             self.tr("Right"): "Right",
 
+            # Output format mappings
+            self.tr("WebP"): "WebP",
+            self.tr("PNG"): "PNG",
+            self.tr("JPEG"): "JPEG",
+
             # Credential services mappings
             self.tr("Custom"): "Custom",
             self.tr("Deepseek"): "Deepseek",
@@ -232,6 +237,7 @@ class SettingsPageUI(QtWidgets.QWidget):
         self.raw_text_checkbox = self.export_page.raw_text_checkbox
         self.translated_text_checkbox = self.export_page.translated_text_checkbox
         self.inpainted_image_checkbox = self.export_page.inpainted_image_checkbox
+        self.output_format_combo = self.export_page.output_format_combo
         self.project_autosave_interval_spinbox = self.project_page.project_autosave_interval_spinbox
         self.project_autosave_folder_input = self.project_page.project_autosave_folder_input
 

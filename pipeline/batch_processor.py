@@ -112,7 +112,10 @@ class BatchProcessor:
             trg_lng_cd = get_language_code(target_lang)
             
             base_name = os.path.splitext(os.path.basename(image_path))[0].strip()
-            extension = os.path.splitext(image_path)[1]
+            # Use configured output format for the extension
+            export_settings = settings_page.get_export_settings()
+            output_format = export_settings.get('output_format', 'WebP')
+            extension = f".{output_format.lower()}"
             directory = os.path.dirname(image_path)
 
             archive_bname = ""

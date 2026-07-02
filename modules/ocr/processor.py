@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 from typing import Any
 
@@ -6,6 +7,10 @@ from modules.utils.language_utils import language_codes, \
     get_lang_code_for_script, get_ocr_bucket_for_script, \
     get_dominant_page_script, is_supported_script, normalize_script
 from .factory import OCRFactory
+from .gemini_ocr import GeminiOCR
+
+logger = logging.getLogger(__name__)
+
 _MANGA_OCR_CLASS_NAMES = {"MangaOCRMobileONNXEngine", "MangaOCREngine", "MangaOCREngineONNX"}
 
 
@@ -62,10 +67,16 @@ class OCRProcessor:
         self._set_source_language(blk_list)
 
         if self.source_lang_english == 'Auto':
-            return self._process_auto(img, blk_list)
+            result = self._process_auto(img, blk_list)
+        else:
+            engine = OCRFactory.create_engine(self.settings, self.source_lang_english, self.ocr_key)
+            result = self._dispatch_with_override(img, blk_list, engine)
 
-        engine = OCRFactory.create_engine(self.settings, self.source_lang_english, self.ocr_key)
-        return self._dispatch_with_override(img, blk_list, engine)
+        # Per-block retry: blocks where primary OCR returned empty text
+        # are retried with Gemini OCR (more powerful for unusual fonts/SFX)
+        self._retry_empty_blocks_with_gemini(img, blk_list)
+
+        return result
 
     def _process_auto(self, img: np.ndarray, blk_list: list[TextBlock]) -> list[TextBlock]:
         """Route each block to an OCR engine using block script plus a page-level fallback."""
@@ -133,3 +144,77 @@ class OCRProcessor:
             self.settings.ui.tr('Default'): 'Default',
         }
         return translator_map.get(localized_ocr, localized_ocr)
+
+    def _is_gemini_engine(self) -> bool:
+        """Check if the currently selected OCR engine is Gemini.
+        
+        Only skip retry when already using Gemini (retrying with itself is wasteful).
+        GPT users can still benefit from Gemini retry since they're different models.
+        """
+        return self.ocr_key == 'Gemini-2.5-Flash-Lite'
+
+    def _retry_empty_blocks_with_gemini(self, img: np.ndarray, blk_list: list[TextBlock]) -> None:
+        """
+        For blocks where primary OCR returned empty/no text, retry with Gemini OCR.
+        
+        Gemini is a multimodal model that handles unusual fonts and SFX better
+        than traditional OCR engines like MangaOCR or PP-OCR.
+        
+        Args:
+            img: Input image as numpy array
+            blk_list: List of TextBlock objects to check and retry
+        """
+        # Don't retry if already using Gemini as primary (retrying itself is wasteful)
+        if self._is_gemini_engine():
+            return
+
+        # Find blocks with empty text
+        empty_blocks = [
+            blk for blk in blk_list
+            if not blk.text or not blk.text.strip()
+        ]
+        if not empty_blocks:
+            return
+
+        # Check if Gemini credentials are available
+        try:
+            translated_service = self.settings.ui.tr('Google Gemini')
+            creds = self.settings.get_credentials(translated_service)
+            api_key = creds.get('api_key', '') if creds else ''
+            if not api_key:
+                logger.debug(
+                    "Gemini OCR retry skipped: no API key configured for %s blocks",
+                    len(empty_blocks),
+                )
+                return
+        except Exception as e:
+            logger.debug("Gemini OCR retry skipped: could not read credentials (%s)", e)
+            return
+
+        logger.info(
+            "Gemini OCR retry: retrying %d block(s) where primary OCR returned empty text",
+            len(empty_blocks),
+        )
+
+        try:
+            gemini_engine = GeminiOCR()
+            gemini_engine.initialize(self.settings, 'Gemini-2.5-Flash-Lite')
+            gemini_engine.process_image(img, empty_blocks)
+
+            success_count = sum(
+                1 for blk in empty_blocks
+                if blk.text and blk.text.strip()
+            )
+            if success_count:
+                logger.info(
+                    "Gemini OCR retry: successfully read %d/%d block(s)",
+                    success_count,
+                    len(empty_blocks),
+                )
+            else:
+                logger.debug(
+                    "Gemini OCR retry: still could not read any of %d block(s)",
+                    len(empty_blocks),
+                )
+        except Exception as e:
+            logger.warning("Gemini OCR per-block retry failed: %s", e)

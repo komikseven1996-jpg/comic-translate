@@ -104,10 +104,13 @@ class SettingsPage(QtWidgets.QWidget):
         autosave_folder = self.ui.project_autosave_folder_input.text().strip()
         if not autosave_folder:
             autosave_folder = get_default_project_autosave_dir()
+        format_text = self.ui.output_format_combo.currentText()
+        output_format = self.ui.value_mappings.get(format_text, format_text)
         settings = {
             'export_raw_text': self.ui.raw_text_checkbox.isChecked(),
             'export_translated_text': self.ui.translated_text_checkbox.isChecked(),
             'export_inpainted_image': self.ui.inpainted_image_checkbox.isChecked(),
+            'output_format': output_format,
             'project_autosave_enabled': autosave_enabled,
             'project_autosave_interval_min': int(self.ui.project_autosave_interval_spinbox.value()),
             'project_autosave_folder': autosave_folder,
@@ -349,6 +352,11 @@ class SettingsPage(QtWidgets.QWidget):
         self.ui.raw_text_checkbox.setChecked(settings.value('export_raw_text', False, type=bool))
         self.ui.translated_text_checkbox.setChecked(settings.value('export_translated_text', False, type=bool))
         self.ui.inpainted_image_checkbox.setChecked(settings.value('export_inpainted_image', False, type=bool))
+        # Load output format (default: WebP)
+        saved_format = settings.value('output_format', 'WebP')
+        translated_format = self.ui.reverse_mappings.get(saved_format, saved_format)
+        if self.ui.output_format_combo.findText(translated_format) != -1:
+            self.ui.output_format_combo.setCurrentText(translated_format)
         autosave_enabled = settings.value('project_autosave_enabled', False, type=bool)
         owner = self.parent()
         title_bar = getattr(owner, "title_bar", None)
