@@ -12,7 +12,10 @@ from app.path_materialization import ensure_path_materialized
 from app.ui.canvas.save_renderer import ImageSaveRenderer
 from app.ui.canvas.text.text_item_properties import TextItemProperties
 from app.ui.canvas.text_item import OutlineInfo, OutlineType
-from modules.rendering.render import get_best_render_area, get_render_outline_for_block, is_vertical_block, pyside_word_wrap
+from modules.rendering.render import (
+    get_best_render_area, get_render_font_style_for_block,
+    get_render_outline_for_block, is_vertical_block, pyside_word_wrap,
+)
 from modules.utils.image_utils import get_smart_text_color
 from modules.utils.language_utils import get_language_code, is_no_space_lang
 from modules.utils.textblock import TextBlock
@@ -55,6 +58,7 @@ class RenderMixin:
         image_path: str,
         blocks: List[TextBlock],
         image_shape: tuple,
+        image: np.ndarray | None = None,
     ) -> None:
         page_state = self.main_page.image_states[image_path]
         viewer_state = page_state.setdefault("viewer_state", {})
@@ -108,6 +112,9 @@ class RenderMixin:
                 continue
 
             vertical = is_vertical_block(block, target_lang_code)
+            role, block_bold, block_italic = get_render_font_style_for_block(
+                block, image, bold, italic
+            )
             block_outline_color, block_outline_width, block_outline_enabled = get_render_outline_for_block(
                 block,
                 outline_color,
@@ -125,8 +132,8 @@ class RenderMixin:
                 height,
                 line_spacing,
                 block_outline_width,
-                bold,
-                italic,
+                block_bold,
+                block_italic,
                 underline,
                 alignment,
                 direction,
@@ -136,14 +143,40 @@ class RenderMixin:
                 is_no_space_lang(target_lang_code),
                 return_metrics=True,
             )
+            block._render_font_size = font_size
+            if role == "sfx":
+                resolved_color, resolved_width, resolved_enabled = get_render_outline_for_block(
+                    block, outline_color, outline_width
+                )
+                if resolved_width != block_outline_width:
+                    block_outline_color = resolved_color
+                    block_outline_width = resolved_width
+                    block_outline_enabled = resolved_enabled
+                    wrapped_translation, font_size, rendered_width, rendered_height = pyside_word_wrap(
+                        translation, font, width, height, line_spacing,
+                        block_outline_width, block_bold, block_italic,
+                        underline, alignment, direction, max_font_size,
+                        min_font_size, vertical,
+                        is_no_space_lang(target_lang_code), return_metrics=True,
+                    )
+                    block._render_font_size = font_size
+
+            # Center the rendered text within the original bounding box
+            x_offset = max(0.0, (width - rendered_width) / 2.0)
+            y_offset = max(0.0, (height - rendered_height) / 2.0)
+            text_x = x1 + x_offset
+            text_y = y1 + y_offset
 
             font_color = get_smart_text_color(block.font_color, base_font_color)
             if should_emit_live:
                 render_block = block.deep_copy()
                 render_block.translation = wrapped_translation
-                render_block.xyxy = list(render_block.xyxy)
-                render_block.xyxy[1] += page_scene_offset
-                render_block.xyxy[3] += page_scene_offset
+                render_block.xyxy = [
+                    text_x + page_scene_offset,
+                    text_y + page_scene_offset,
+                    text_x + rendered_width + page_scene_offset,
+                    text_y + rendered_height + page_scene_offset,
+                ]
                 if render_block.bubble_xyxy is not None:
                     render_block.bubble_xyxy = list(render_block.bubble_xyxy)
                     render_block.bubble_xyxy[1] += page_scene_offset
@@ -162,10 +195,10 @@ class RenderMixin:
                 outline_color=block_outline_color,
                 outline_width=block_outline_width,
                 outline=block_outline_enabled,
-                bold=bold,
-                italic=italic,
+                bold=block_bold,
+                italic=block_italic,
                 underline=underline,
-                position=(x1, y1),
+                position=(text_x, text_y),
                 rotation=block.angle,
                 scale=1.0,
                 transform_origin=block.tr_origin_point if block.tr_origin_point else (0, 0),

@@ -200,10 +200,9 @@ def detect_content_in_bbox(
     else:
         return bboxes_black
 
-
 def detect_content_mask_in_bbox(
     image: np.ndarray,
-    min_area: int = 10,
+    min_area: int = 5,
     margin: int = 1,
 ) -> np.ndarray:
     """
@@ -224,7 +223,22 @@ def detect_content_mask_in_bbox(
 
     mask_black = _mask_from_component_stats(binary_black_text, min_area=min_area, margin=margin)
     mask_white = _mask_from_component_stats(binary_white_text, min_area=min_area, margin=margin)
-    return np.where((mask_black > 0) | (mask_white > 0), 255, 0).astype(np.uint8)
+    mask = np.where((mask_black > 0) | (mask_white > 0), 255, 0).astype(np.uint8)
+
+    # Grow the mask into neighboring anti-aliased pixels (grey halo between the
+    # glyph core and the background) that the hard Otsu split misses. This only
+    # extends from pixels already confirmed as text, so it won't bleed into the
+    # rest of the bubble background.
+    if np.any(mask):
+        grey_band = 30
+        near_glyph_color = np.abs(gray.astype(np.int16) - int(threshold)) <= grey_band
+        grow_kernel = np.ones((3, 3), np.uint8)
+        dilated_glyph_area = imk.dilate(mask, grow_kernel, iterations=2) > 0
+        anti_alias_halo = dilated_glyph_area & near_glyph_color & (mask == 0)
+        mask = np.where((mask > 0) | anti_alias_halo, 255, 0).astype(np.uint8)
+
+    return mask
+
 
 
 def _mask_from_component_stats(
@@ -232,8 +246,8 @@ def _mask_from_component_stats(
     *,
     min_area: int,
     margin: int,
-    small_component_min_area: int = 4,
-    small_component_max_span: int = 6,
+    small_component_min_area: int = 3,
+    small_component_max_span: int = 8,
 ) -> np.ndarray:
     num_labels, labels, stats, _ = imk.connected_components_with_stats(binary_mask, connectivity=8)
     if num_labels <= 1:

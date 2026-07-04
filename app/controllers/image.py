@@ -492,6 +492,7 @@ class ImageStateController:
                     im = self.load_image(path)
                     self.display_image_from_loaded(im, new_index, False)
                 self.main.mark_project_dirty()
+                self._auto_start_batch()
 
             self.main.run_threaded(
                 lambda: self.main.file_handler.prepare_files(paths, True),
@@ -534,6 +535,8 @@ class ImageStateController:
         self.main.image_viewer.fitInView()
         if self.main.image_files:
             self.main.mark_project_dirty()
+        
+        self._auto_start_batch()
 
     def refresh_page_list(self):
         page_list = self.main.page_list
@@ -1322,6 +1325,10 @@ class ImageStateController:
     def apply_inpaint_patches(self, patches):
         command = PatchInsertCommand(self.main, patches, self.main.image_files[self.main.curr_img_idx])
         self.main.undo_group.activeStack().push(command)
+
+    def _auto_start_batch(self):
+        """Auto-start batch processing — currently disabled for testing."""
+        pass
 
     def cleanup(self):
         """Clean up resources, including the lazy loader."""

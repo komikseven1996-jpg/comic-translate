@@ -9,13 +9,17 @@ from modules.detection.utils.content import get_inpaint_mask
 
 BUBBLE_CLEANING_PROFILES: dict[str, dict[str, Any]] = {
     "sfx": {
-        "crop_width_expand_pct": 4,
-        "crop_height_expand_pct": 4,
+        "crop_width_expand_pct": 1,
+        "crop_height_expand_pct": 1,
         "crop_padding_px": 0,
         "mask_kernel_size": 2,
         "mask_dilate_iterations": 1,
         "close_mask": False,
-        "min_component_area": 12,
+        "min_component_area": 4,
+        "use_foreground_color_mask": True,
+        "foreground_color_tolerance": 58,
+        "max_component_ratio": 0.14,
+        "max_mask_ratio": 0.32,
         "clip_components_to_bubble": False,
         "fast_fill": False,
     },
@@ -42,7 +46,7 @@ BUBBLE_CLEANING_PROFILES: dict[str, dict[str, Any]] = {
         "crop_height_expand_pct": 10,
         "crop_padding_px": 0,
         "mask_kernel_size": 5,
-        "mask_dilate_iterations": 3,
+        "mask_dilate_iterations": 8,
         "clip_components_to_bubble": True,
         "fast_fill": True,
         "use_full_bubble_crop": True,
@@ -51,10 +55,11 @@ BUBBLE_CLEANING_PROFILES: dict[str, dict[str, Any]] = {
         "crop_width_expand_pct": 8,
         "crop_height_expand_pct": 8,
         "crop_padding_px": 0,
-        "mask_kernel_size": 3,
-        "mask_dilate_iterations": 2,
-        "clip_components_to_bubble": False,
+        "mask_kernel_size": 4,
+        "mask_dilate_iterations": 4,
+        "clip_components_to_bubble": True,
         "fast_fill": False,
+        "use_full_bubble_crop": True,
     },
 }
 
@@ -408,6 +413,117 @@ def _drop_tiny_mask_components(mask: np.ndarray, min_area: int) -> np.ndarray:
     return np.where(np.isin(labels, keep_labels), 255, 0).astype(mask.dtype, copy=False)
 
 
+def _build_sfx_foreground_mask(
+    crop: np.ndarray,
+    blk: TextBlock,
+    profile_settings: dict[str, Any],
+) -> np.ndarray | None:
+    """Build a conservative SFX glyph mask from the detected font colour.
+
+    Components touching the crop boundary or occupying a large part of the
+    crop are rejected because they are more likely panel art/screentone than
+    lettering. Returning None deliberately skips destructive cleaning.
+    """
+    font_color = getattr(blk, "font_color", None)
+    if crop is None or crop.size == 0 or not font_color or len(font_color) < 3:
+        return None
+
+    color = np.asarray(font_color[:3], dtype=np.float32)
+    pixels = crop[..., :3].astype(np.float32)
+    tolerance = float(profile_settings.get("foreground_color_tolerance", 58))
+    distance = np.sqrt(np.sum((pixels - color) ** 2, axis=2))
+    candidate = (distance <= tolerance).astype(np.uint8)
+
+    count, labels, stats, _ = imk.connected_components_with_stats(candidate, connectivity=8)
+    if count <= 1:
+        return None
+
+    height, width = candidate.shape
+    crop_area = max(1, height * width)
+    max_component_area = int(
+        crop_area * float(profile_settings.get("max_component_ratio", 0.14))
+    )
+    keep_labels = []
+    for label in range(1, count):
+        x = int(stats[label, imk.CC_STAT_LEFT])
+        y = int(stats[label, imk.CC_STAT_TOP])
+        w = int(stats[label, imk.CC_STAT_WIDTH])
+        h = int(stats[label, imk.CC_STAT_HEIGHT])
+        area = int(stats[label, imk.CC_STAT_AREA])
+        touches_edge = x <= 0 or y <= 0 or x + w >= width or y + h >= height
+        if 4 <= area <= max_component_area and not touches_edge:
+            keep_labels.append(label)
+
+    if not keep_labels:
+        return None
+
+    mask = np.where(np.isin(labels, keep_labels), 255, 0).astype(np.uint8)
+    mask_ratio = float(np.count_nonzero(mask)) / float(crop_area)
+    if mask_ratio > float(profile_settings.get("max_mask_ratio", 0.32)):
+        return None
+    return mask
+
+
+def _line_bbox(line) -> tuple[int, int, int, int] | None:
+    """Normalize one detected text line (axis-aligned rect or a 4-point
+    polygon, as produced by curved/rotated OCR) into an (x1, y1, x2, y2) box.
+    """
+    try:
+        arr = np.asarray(line, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if arr.size == 0:
+        return None
+    if arr.ndim == 1 and arr.size == 4:
+        x1, y1, x2, y2 = arr.tolist()
+    elif arr.ndim == 2 and arr.shape[1] == 2:
+        x1, y1 = float(arr[:, 0].min()), float(arr[:, 1].min())
+        x2, y2 = float(arr[:, 0].max()), float(arr[:, 1].max())
+    else:
+        return None
+    return (
+        int(round(min(x1, x2))), int(round(min(y1, y2))),
+        int(round(max(x1, x2))), int(round(max(y1, y2))),
+    )
+
+
+def _build_sfx_redraw_mask(
+    crop: np.ndarray,
+    blk: TextBlock,
+    crop_offset: tuple[int, int],
+    pad: int = 2,
+) -> np.ndarray | None:
+    """Build a mask straight from the detector's own text-line boxes instead
+    of guessing which pixels are lettering by colour or threshold.
+
+    This trusts geometry the OCR/detector already committed to, so it only
+    ever touches the exact regions known to contain text — it can't mistake
+    busy background art (speed-lines, screentone) for glyphs the way a
+    colour- or threshold-based mask can, because it never looks at pixel
+    values at all.
+    """
+    lines = getattr(blk, "lines", None)
+    if not lines:
+        return None
+    off_x, off_y = crop_offset
+    h, w = crop.shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+    drawn = False
+    for line in lines:
+        bbox = _line_bbox(line)
+        if bbox is None:
+            continue
+        lx1, ly1, lx2, ly2 = bbox
+        lx1, ly1, lx2, ly2 = lx1 - off_x, ly1 - off_y, lx2 - off_x, ly2 - off_y
+        lx1, ly1 = max(0, lx1 - pad), max(0, ly1 - pad)
+        lx2, ly2 = min(w, lx2 + pad), min(h, ly2 + pad)
+        if lx2 <= lx1 or ly2 <= ly1:
+            continue
+        mask[ly1:ly2, lx1:lx2] = 255
+        drawn = True
+    return mask if drawn else None
+
+
 def get_bubble_cleaning_profile(img: np.ndarray, blk: TextBlock) -> str:
     override = getattr(blk, "bubble_cleaning_profile", None) or getattr(blk, "cleaning_profile", None)
     if override in BUBBLE_CLEANING_PROFILES:
@@ -505,12 +621,21 @@ def build_block_mask_data(
 
     crop = img[cy1:cy2, cx1:cx2]
 
-    crop_mask = detect_content_mask_in_bbox(crop)
+    profile = get_bubble_cleaning_profile(img, blk)
+    profile_settings = BUBBLE_CLEANING_PROFILES.get(profile, BUBBLE_CLEANING_PROFILES["free_text"])
+    if profile_settings.get("use_foreground_color_mask") is True:
+        crop_mask = _build_sfx_foreground_mask(crop, blk, profile_settings)
+        if crop_mask is None or not np.any(crop_mask):
+            # Colour isolation failed (e.g. text colour matches busy
+            # background art). Fall back to the OCR's own line boxes instead
+            # of a threshold over the whole crop — this stays confined to
+            # regions already known to be text, so it can't erase artwork.
+            crop_mask = _build_sfx_redraw_mask(crop, blk, (cx1, cy1))
+    else:
+        crop_mask = detect_content_mask_in_bbox(crop)
     if crop_mask is None or not np.any(crop_mask):
         return None, None
 
-    profile = get_bubble_cleaning_profile(img, blk)
-    profile_settings = BUBBLE_CLEANING_PROFILES.get(profile, BUBBLE_CLEANING_PROFILES["free_text"])
     min_component_area = int(profile_settings.get("min_component_area", 0))
     if min_component_area > 0:
         crop_mask = _drop_tiny_mask_components(crop_mask, min_component_area)

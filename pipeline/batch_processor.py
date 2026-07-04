@@ -20,7 +20,10 @@ from modules.utils.pipeline_config import get_config
 from modules.utils.image_utils import generate_mask, get_smart_text_color
 from modules.utils.language_utils import get_language_code, is_no_space_lang
 from modules.utils.translator_utils import get_raw_translation, get_raw_text, format_translations, is_renderable_translation
-from modules.rendering.render import get_best_render_area, get_render_outline_for_block, pyside_word_wrap, is_vertical_block
+from modules.rendering.render import (
+    get_best_render_area, get_render_font_style_for_block,
+    get_render_outline_for_block, pyside_word_wrap, is_vertical_block,
+)
 from modules.utils.device import resolve_device
 from modules.utils.exceptions import InsufficientCreditsException
 from app.path_materialization import ensure_path_materialized
@@ -406,6 +409,9 @@ class BatchProcessor:
                 
                 # Determine if this block should use vertical rendering
                 vertical = is_vertical_block(blk, trg_lng_cd)
+                role, block_bold, block_italic = get_render_font_style_for_block(
+                    blk, image, bold, italic
+                )
                 block_outline_color, block_outline_width, block_outline_enabled = get_render_outline_for_block(
                     blk,
                     outline_color,
@@ -419,8 +425,8 @@ class BatchProcessor:
                     block_height,
                     line_spacing, 
                     block_outline_width, 
-                    bold, 
-                    italic, 
+                    block_bold,
+                    block_italic,
                     underline,
                     alignment, 
                     direction, 
@@ -430,13 +436,41 @@ class BatchProcessor:
                     is_no_space_lang(trg_lng_cd),
                     return_metrics=True
                 )
+                blk._render_font_size = font_size
+                if role == "sfx":
+                    resolved_color, resolved_width, resolved_enabled = get_render_outline_for_block(
+                        blk, outline_color, outline_width
+                    )
+                    if resolved_width != block_outline_width:
+                        block_outline_color = resolved_color
+                        block_outline_width = resolved_width
+                        block_outline_enabled = resolved_enabled
+                        translation, font_size, rendered_width, rendered_height = pyside_word_wrap(
+                            blk.translation, font, block_width, block_height,
+                            line_spacing, block_outline_width, block_bold,
+                            block_italic, underline, alignment, direction,
+                            max_font_size, min_font_size, vertical,
+                            is_no_space_lang(trg_lng_cd), return_metrics=True,
+                        )
+                        blk._render_font_size = font_size
                 
-                # Display text if on current page  
-                if image_path == file_on_display:
-                    self.main_page.blk_rendered.emit(translation, font_size, blk, image_path)
-
                 # Smart Color Override
                 font_color = get_smart_text_color(blk.font_color, setting_font_color)
+
+                # Center the rendered text within the original bounding box
+                x_offset = max(0.0, (block_width - rendered_width) / 2.0)
+                y_offset = max(0.0, (block_height - rendered_height) / 2.0)
+                text_x = x1 + x_offset
+                text_y = y1 + y_offset
+
+                # Display text if on current page (with centered position)
+                if image_path == file_on_display:
+                    render_blk = blk.deep_copy()
+                    render_blk.xyxy = [
+                        text_x, text_y,
+                        text_x + rendered_width, text_y + rendered_height,
+                    ]
+                    self.main_page.blk_rendered.emit(translation, font_size, render_blk, image_path)
 
                 # Use TextItemProperties for consistent text item creation
                 text_props = TextItemProperties(
@@ -449,10 +483,10 @@ class BatchProcessor:
                     outline_color=block_outline_color,
                     outline_width=block_outline_width,
                     outline=block_outline_enabled,
-                    bold=bold,
-                    italic=italic,
+                    bold=block_bold,
+                    italic=block_italic,
                     underline=underline,
-                    position=(x1, y1),
+                    position=(text_x, text_y),
                     rotation=blk.angle,
                     scale=1.0,
                     transform_origin=blk.tr_origin_point,

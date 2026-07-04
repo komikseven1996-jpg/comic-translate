@@ -1,4 +1,5 @@
 import numpy as np
+import imkit as imk
 from typing import Tuple, List
 
 from PIL import Image, ImageFont, ImageDraw
@@ -16,7 +17,9 @@ from modules.utils.language_utils import get_language_code, is_no_space_lang
 
 from dataclasses import dataclass
 
-SFX_OUTLINE_WIDTH = 4.0
+SFX_SMALL_OUTLINE_WIDTH = 1.0
+SFX_LARGE_OUTLINE_WIDTH = 2.0
+SFX_LARGE_FONT_THRESHOLD = 32
 
 @dataclass
 class TextRenderingSettings:
@@ -72,9 +75,141 @@ def is_sfx_block(blk) -> bool:
         return False
     return getattr(blk, "text_class", None) == "text_free"
 
+
+def _box_area(box) -> float:
+    if box is None or len(box) < 4:
+        return 0.0
+    return max(0.0, float(box[2]) - float(box[0])) * max(0.0, float(box[3]) - float(box[1]))
+
+
+def _is_large_balloon(blk) -> bool:
+    text_area = max(1.0, _box_area(getattr(blk, "xyxy", None)))
+    bubble = getattr(blk, "bubble_xyxy", None)
+    bubble_area = _box_area(bubble)
+    if bubble_area <= 0:
+        return False
+    return bubble_area / text_area >= 4.5
+
+
+def _is_dashed_balloon(blk, image) -> bool:
+    """Detect a fragmented/dashed border without changing detection output."""
+    bubble = getattr(blk, "bubble_xyxy", None)
+    if image is None or not isinstance(image, np.ndarray) or bubble is None:
+        return False
+    h, w = image.shape[:2]
+    x1, y1, x2, y2 = [int(round(float(v))) for v in bubble[:4]]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
+    if x2 - x1 < 24 or y2 - y1 < 24:
+        return False
+    crop = image[y1:y2, x1:x2]
+    gray = (
+        np.dot(crop[..., :3], np.array([0.299, 0.587, 0.114]))
+        if crop.ndim == 3 else crop
+    )
+    dark = (gray < 80).astype(np.uint8)
+    band_y = max(3, int(dark.shape[0] * 0.22))
+    band_x = max(3, int(dark.shape[1] * 0.22))
+    ring = np.zeros_like(dark)
+    ring[:band_y, :] = 1
+    ring[-band_y:, :] = 1
+    ring[:, :band_x] = 1
+    ring[:, -band_x:] = 1
+    border_ink = dark * ring
+    count, _labels, stats, _ = imk.connected_components_with_stats(border_ink, connectivity=8)
+    areas = [
+        int(stats[i, imk.CC_STAT_AREA])
+        for i in range(1, count)
+        if stats[i, imk.CC_STAT_AREA] >= 3
+    ]
+    total = sum(areas)
+    if len(areas) < 6 or total == 0:
+        return False
+    return max(areas) / float(total) < 0.48
+
+
+def _is_starburst_balloon(blk, image) -> bool:
+    """Detect an oval bubble ringed by pointed black spikes (shout/reveal burst)."""
+    bubble = getattr(blk, "bubble_xyxy", None)
+    if image is None or not isinstance(image, np.ndarray) or bubble is None:
+        return False
+    h, w = image.shape[:2]
+    bx1, by1, bx2, by2 = [int(round(float(v))) for v in bubble[:4]]
+    bw = bx2 - bx1
+    bh = by2 - by1
+    if bw < 24 or bh < 24:
+        return False
+
+    # Look at a donut-shaped region just outside the bubble oval, where spikes live.
+    margin_x = max(6, int(bw * 0.35))
+    margin_y = max(6, int(bh * 0.35))
+    ox1, oy1 = max(0, bx1 - margin_x), max(0, by1 - margin_y)
+    ox2, oy2 = min(w, bx2 + margin_x), min(h, by2 + margin_y)
+    if ox2 - ox1 < 24 or oy2 - oy1 < 24:
+        return False
+
+    outer_crop = image[oy1:oy2, ox1:ox2]
+    gray = (
+        np.dot(outer_crop[..., :3], np.array([0.299, 0.587, 0.114]))
+        if outer_crop.ndim == 3 else outer_crop
+    )
+
+    # Mask out the inner oval itself so we only look at the spike donut area.
+    donut = np.ones(gray.shape, dtype=np.uint8)
+    inner_x1 = bx1 - ox1
+    inner_y1 = by1 - oy1
+    inner_x2 = bx2 - ox1
+    inner_y2 = by2 - oy1
+    donut[max(0, inner_y1):max(0, inner_y2), max(0, inner_x1):max(0, inner_x2)] = 0
+
+    dark = ((gray < 80).astype(np.uint8)) * donut
+    if not np.any(dark):
+        return False
+
+    count, _labels, stats, _ = imk.connected_components_with_stats(dark, connectivity=8)
+    spike_components = [
+        int(stats[i, imk.CC_STAT_AREA])
+        for i in range(1, count)
+        if stats[i, imk.CC_STAT_AREA] >= 6
+    ]
+    # A starburst halo is made of many small, separate pointed shapes rather
+    # than one or two large solid blobs.
+    if len(spike_components) < 8:
+        return False
+    donut_area = max(1, int(np.count_nonzero(donut)))
+    largest_share = max(spike_components) / float(sum(spike_components))
+    dark_coverage = sum(spike_components) / float(donut_area)
+    return largest_share < 0.25 and 0.08 <= dark_coverage <= 0.75
+
+
+def get_render_font_style_for_block(blk, image=None, default_bold=False, default_italic=False):
+    """Return (role, bold, italic) while preserving explicit block overrides."""
+    explicit = getattr(blk, "render_role", None)
+    if explicit in {"regular", "dotted", "large", "sfx", "starburst"}:
+        role = explicit
+    elif is_sfx_block(blk):
+        role = "sfx"
+    elif _is_starburst_balloon(blk, image):
+        role = "starburst"
+    elif _is_dashed_balloon(blk, image):
+        role = "dotted"
+    elif _is_large_balloon(blk):
+        role = "large"
+    else:
+        role = "regular"
+
+    blk.render_role = role
+    return role, default_bold, default_italic
+
+
+def get_sfx_outline_width(font_size) -> float:
+    return SFX_LARGE_OUTLINE_WIDTH if float(font_size or 0) >= SFX_LARGE_FONT_THRESHOLD else SFX_SMALL_OUTLINE_WIDTH
+
+
 def get_render_outline_for_block(blk, outline_color, outline_width: float):
     if is_sfx_block(blk):
-        return outline_color or QColor("#ffffff"), SFX_OUTLINE_WIDTH, True
+        font_size = getattr(blk, "_render_font_size", 0)
+        return outline_color or QColor("#ffffff"), get_sfx_outline_width(font_size), True
     return outline_color, outline_width, outline_color is not None
 
 def _split_at_fitting_hyphen(
@@ -461,6 +596,12 @@ def manual_wrap(
     target_lang = main_page.lang_mapping.get(main_page.t_combo.currentText(), None)
     trg_lng_cd = get_language_code(target_lang)
 
+    detection_image = None
+    try:
+        detection_image = main_page.image_viewer.get_image_array()
+    except Exception:
+        detection_image = None
+
     for blk in blk_list:
         x1, y1, width, height = blk.xywh
 
@@ -469,6 +610,9 @@ def manual_wrap(
             continue
 
         vertical = is_vertical_block(blk, trg_lng_cd)
+        role, block_bold, block_italic = get_render_font_style_for_block(
+            blk, detection_image, bold, italic
+        )
         _outline_color, effective_outline_width, _outline_enabled = get_render_outline_for_block(
             blk,
             QColor("#ffffff"),
@@ -482,8 +626,8 @@ def manual_wrap(
             height,
             line_spacing, 
             effective_outline_width, 
-            bold, 
-            italic, 
+            block_bold,
+            block_italic,
             underline,
             alignment, 
             direction, 
@@ -492,6 +636,19 @@ def manual_wrap(
             vertical,
             is_no_space_lang(trg_lng_cd)
         )
+        blk._render_font_size = font_size
+        if role == "sfx":
+            _outline_color, resolved_width, _outline_enabled = get_render_outline_for_block(
+                blk, QColor("#ffffff"), outline_width
+            )
+            if resolved_width != effective_outline_width:
+                translation, font_size = pyside_word_wrap(
+                    blk.translation, font_family, width, height, line_spacing,
+                    resolved_width, block_bold, block_italic, underline,
+                    alignment, direction, init_font_size, min_font_size,
+                    vertical, is_no_space_lang(trg_lng_cd)
+                )
+                blk._render_font_size = font_size
         
         main_page.blk_rendered.emit(translation, font_size, blk, image_path)
 

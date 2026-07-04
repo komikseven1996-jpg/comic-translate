@@ -366,11 +366,22 @@ class FlowMixin:
             blocks=blocks,
             has_patches=bool(patches),
         )
+        # Read physical page image for dashed balloon detection
+        physical_image = None
+        try:
+            ensure_path_materialized(image_path)
+            with Image.open(image_path) as pil_img:
+                if pil_img.mode != "RGB":
+                    pil_img = pil_img.convert("RGB")
+                physical_image = np.array(pil_img)
+        except Exception:
+            logger.warning("Failed to read physical image for balloon style detection: %s", image_path)
         self._store_page_text_items(
             page_index=global_index,
             image_path=image_path,
             blocks=prepared_blocks,
             image_shape=(page_info["height"], page_info["width"], 3),
+            image=physical_image,
         )
 
         self.final_patches_for_save[image_path] = patches

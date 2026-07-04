@@ -17,6 +17,7 @@ from app.ui.canvas.text.text_item_properties import TextItemProperties
 from modules.utils.textblock import TextBlock
 from modules.rendering.render import (
     TextRenderingSettings,
+    get_render_font_style_for_block,
     get_render_outline_for_block,
     manual_wrap,
     is_vertical_block,
@@ -140,6 +141,9 @@ class TextController:
         )
         bold = render_settings.bold
         italic = render_settings.italic
+        _role, bold, italic = get_render_font_style_for_block(
+            blk, None, bold, italic
+        )
         underline = render_settings.underline
         direction = render_settings.direction
         vertical = is_vertical_block(blk, trg_lng_cd)
@@ -858,6 +862,9 @@ class TextController:
                             continue
 
                         vertical = is_vertical_block(blk, trg_lng_cd)
+                        _role, block_bold, block_italic = get_render_font_style_for_block(
+                            blk, None, bold, italic
+                        )
                         block_outline_color, block_outline_width, block_outline_enabled = get_render_outline_for_block(
                             blk,
                             outline_color,
@@ -870,8 +877,8 @@ class TextController:
                             block_height,
                             line_spacing,
                             block_outline_width,
-                            bold,
-                            italic,
+                            block_bold,
+                            block_italic,
                             underline,
                             alignment,
                             direction,
@@ -881,6 +888,29 @@ class TextController:
                             is_no_space_lang(trg_lng_cd),
                             return_metrics=True,
                         )
+                        blk._render_font_size = font_size
+                        if _role == "sfx":
+                            resolved_color, resolved_width, resolved_enabled = get_render_outline_for_block(
+                                blk, outline_color, outline_width
+                            )
+                            if resolved_width != block_outline_width:
+                                block_outline_color = resolved_color
+                                block_outline_width = resolved_width
+                                block_outline_enabled = resolved_enabled
+                                wrapped, font_size, rendered_width, rendered_height = pyside_word_wrap(
+                                    translation, font_family, block_width, block_height,
+                                    line_spacing, block_outline_width, block_bold,
+                                    block_italic, underline, alignment, direction,
+                                    max_font_size, min_font_size, vertical,
+                                    is_no_space_lang(trg_lng_cd), return_metrics=True,
+                                )
+                                blk._render_font_size = font_size
+
+                        # Center the rendered text within the original bounding box
+                        x_offset = max(0.0, (block_width - rendered_width) / 2.0)
+                        y_offset = max(0.0, (block_height - rendered_height) / 2.0)
+                        text_x = x1 + x_offset
+                        text_y = y1 + y_offset
 
                         font_color = get_smart_text_color(blk.font_color, setting_font_color)
                         text_props = TextItemProperties(
@@ -893,11 +923,11 @@ class TextController:
                             outline_color=block_outline_color,
                             outline_width=block_outline_width,
                             outline=block_outline_enabled,
-                            bold=bold,
-                            italic=italic,
+                            bold=block_bold,
+                            italic=block_italic,
                             underline=underline,
                             direction=direction,
-                            position=(x1, y1),
+                            position=(text_x, text_y),
                             rotation=blk.angle,
                             scale=1.0,
                             transform_origin=blk.tr_origin_point if blk.tr_origin_point else (0, 0),

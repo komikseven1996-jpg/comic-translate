@@ -57,6 +57,7 @@ class TextBlock(object):
         self.max_font_size = max_font_size
         self.font_color = font_color
         self.direction = direction
+        self.render_role = kwargs.get("render_role", None)
 
     @property
     def xywh(self):
@@ -108,6 +109,8 @@ class TextBlock(object):
         new_block.max_font_size = self.max_font_size
         new_block.font_color = self.font_color
         new_block.direction = self.direction
+        new_block.render_role = getattr(self, "render_role", None)
+        new_block._render_font_size = getattr(self, "_render_font_size", 0)
         
         return new_block
 
